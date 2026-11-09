@@ -286,6 +286,7 @@ function normalizeChatConversations(value) {
 }
 
 export function normalizeDirectSyncState(value, warnings = []) {
+  // true 表示已建立日常增量边界（首次限定范围或手动完整读取均可）。
   // 只给还没有 directSync 字段的旧快照用；有了字段就以它为准，否则读到一半标的「没读完」会被旧提示盖回去
   const legacyComplete = !value
     && Array.isArray(warnings)
@@ -295,6 +296,11 @@ export function normalizeDirectSyncState(value, warnings = []) {
     type,
     value?.[type] === true || legacyComplete,
   ]));
+}
+
+function pendingWatchHistoryBoundary(value) {
+  return typeof value === "string" && value.startsWith("watch_history:") && value.length <= 500
+    ? { pendingWatchHistoryBoundary: value } : {};
 }
 
 export function emptyStoredSnapshot() {
@@ -350,6 +356,7 @@ export class CollectorStore {
         chatMessages: normalizedChatMessages,
         warnings: normalizedWarnings(parsed.warnings),
         directSync: normalizeDirectSyncState(parsed.directSync, parsed.warnings),
+        ...pendingWatchHistoryBoundary(parsed.pendingWatchHistoryBoundary),
         ...(this.groupChatStorage.conversationIds.length ? { groupChatStorage: { conversationIds: [...this.groupChatStorage.conversationIds] } } : {}),
       };
       if (!snapshot.records) return emptyStoredSnapshot();
@@ -380,7 +387,7 @@ export class CollectorStore {
     }
   }
 
-  async save(records, warnings = [], { directSync, chatMessages, chatConversations } = {}) {
+  async save(records, warnings = [], { directSync, chatMessages, chatConversations, pendingWatchHistoryBoundary: pendingBoundary } = {}) {
     // 聊天存盘传回的就是上次存好、规整过的那份，上万条记录再规整一遍要一百多毫秒，还堵着窗口所在的主进程
     const normalizedRecords = records === this.savedRecords ? records : normalizeRecordCollection(records) ?? createEmptyRecords();
     await mkdir(this.dataDirectory, { recursive: true });
@@ -397,6 +404,7 @@ export class CollectorStore {
       chatMessages: normalizeChatCollection(chatMessages, groupConversationIds, new Set(this.groupChatStorage.conversationIds)),
       warnings: normalizedWarnings(warnings),
       directSync: normalizeDirectSyncState(directSync),
+      ...pendingWatchHistoryBoundary(pendingBoundary),
       ...(this.groupChatStorage.conversationIds.length ? { groupChatStorage: { conversationIds: [...this.groupChatStorage.conversationIds] } } : {}),
     };
     await this.writeSnapshot(snapshot);

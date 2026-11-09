@@ -292,7 +292,7 @@ export function BrowserConnectionPanel({ visible, baseUrl, token, status, blocke
             <Text style={styles.text}>{readPermissions[kind] ? "✓ " : "○ "}{kind === "videos" ? "读取视频" : "读取聊天"}</Text>
           </Pressable>)}
         </View>
-        <Text style={styles.detail}>视频：观看历史、喜欢、收藏及视频相关联网读取。聊天：历史记录、实时接收及火花。勾选视频后自动完整读取一次，勾选聊天后自动整理历史并开始接收；未勾选的类型不能继续联网读取，已有本地数据仍可查看。</Text>
+        <Text style={styles.detail}>视频：观看历史、喜欢、收藏及视频相关联网读取。首次读取观看历史最近 7 天、喜欢和收藏各最多 200 条，之后只补新增；需要更多历史可手动完整读取。聊天：历史记录、实时接收及火花，勾选后自动整理历史并开始接收。未勾选的类型不能继续联网读取，已有本地数据仍可查看。</Text>
         {candidate.browser === "desktop" ? <Text style={styles.detail}>抖音桌面端里存着收私信要用的操作证书，一起导入后聊天也能直接走接口；证书对不上时会在下一次打开客户端后自动补上。</Text> : null}
         {!readPermissions.videos && !readPermissions.chat ? <Text style={styles.error}>请至少选择一项读取权限。</Text> : null}
         <View style={styles.actions}>

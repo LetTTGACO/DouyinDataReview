@@ -715,7 +715,7 @@ export async function startCollectorServer({
                 else { await explorer.close(); await collector.shutdown(); }
                 if (adopt) await collector.keepLocalLists();
                 await collector.attachDesktopClient({ ...desktop, readPermissions });
-                if (readPermissions.videos) collector.startSync({ mode: created ? "full_records" : "direct_records" });
+                if (readPermissions.videos) collector.startSync({ mode: "direct_records" });
                 sendJson(response, 200, { ...accounts.list(), status: collector.getStatus() });
               } catch (error) {
                 // Keep a newly created account recoverable; do not delete its data.
@@ -739,8 +739,8 @@ export async function startCollectorServer({
               else { await explorer.close(); await collector.shutdown(); }
               if (adopt) await collector.keepLocalLists();
               await collector.attachExternalBrowser(pending.connection, identity, pending.page, readPermissions);
-              // 已有账号重新导入只补新增；没读完过的分类 runDirectRecords 会自己退回整份读取
-              if (readPermissions.videos) collector.startSync({ mode: created ? "full_records" : "direct_records" });
+              // 首次按最近 7 天 / 200 条建立边界，已有账号只补新增。
+              if (readPermissions.videos) collector.startSync({ mode: "direct_records" });
               sendJson(response, 200, { ...accounts.list(), status: collector.getStatus() });
             } catch (error) {
               await pending.connection.disconnect();

@@ -853,7 +853,7 @@ describe("DouyinCollector direct records", () => {
       };
     });
 
-    await collector.runDirectRecords(1);
+    await collector.runDirectRecords(1, { full: true });
 
     expect(collector.snapshot.records.watch_history[0]).toMatchObject({
       videoId: "history-new",
@@ -906,7 +906,7 @@ describe("DouyinCollector direct records", () => {
       return { status_code: 0, aweme_list: [{ aweme_id: "saved-watch" }], aweme_date: { "saved-watch": 1_700_000_000 }, has_more: 0 };
     });
 
-    await collector.runDirectRecords(1);
+    await collector.runDirectRecords(1, { full: true });
 
     expect(collector.status.state).toBe("complete");
     expect(collector.snapshot.records.watch_history.map((record) => [record.videoId, record.watchCompleted])).toEqual([["saved-watch", undefined]]);
@@ -935,7 +935,7 @@ describe("DouyinCollector direct records", () => {
 
     // 抖音桌面端的登录态读点赞回空响应：点赞跳过、原有的留着，收藏照常读完
     const collector = setup(new DirectHistoryError("invalid_json", "抖音接口没有返回有效 JSON。"));
-    await collector.runDirectRecords(1);
+    await collector.runDirectRecords(1, { full: true });
     expect(collector.status.state).toBe("complete");
     expect(collector.status.message).toContain("点赞列表这次没读到（抖音接口没有返回有效 JSON）");
     expect(collector.snapshot.records.liked_videos.map((record) => record.videoId)).toEqual(["liked-old"]);
@@ -1005,7 +1005,7 @@ describe("DouyinCollector direct records", () => {
       return 1;
     });
 
-    await collector.runDirectRecords(1);
+    await collector.runDirectRecords(1, { full: true });
 
     expect(secondPageFailures).toBe(2);
     expect(collector.snapshot.records.watch_history.map((record) => record.videoId)).toEqual(["watch-0", "watch-1"]);
@@ -1050,7 +1050,7 @@ describe("DouyinCollector direct records", () => {
       throw new Error("liked_request_failed");
     });
 
-    await expect(collector.runDirectRecords(1)).rejects.toThrow("liked_request_failed");
+    await expect(collector.runDirectRecords(1, { full: true })).rejects.toThrow("liked_request_failed");
 
     expect(store.save).toHaveBeenCalledTimes(1);
     expect(collector.snapshot.records.watch_history.map((record) => record.videoId)).toEqual(["saved-watch"]);
@@ -1103,7 +1103,7 @@ describe("DouyinCollector direct records", () => {
 
   it.each([
     ["an incremental like read", true],
-    ["a full like re-read", false],
+    ["a bounded first like read", false],
   ])("keeps saved likes when %s stops halfway", async (_label, likesComplete) => {
     const initial = emptySnapshot();
     initial.directSync = normalizeDirectSyncState({ watch_history: true, liked_videos: likesComplete, favorite_videos: true });
@@ -1282,7 +1282,7 @@ describe("DouyinCollector direct records", () => {
       max_cursor: "1700000000000",
     }));
 
-    await collector.runDirectRecords(1);
+    await collector.runDirectRecords(1, { full: true });
     expect(collector.readDirectHistory.mock.calls.filter(([, , options]) => !options?.completedOnly)).toHaveLength(2);
     expect(collector.snapshot.records.watch_history.map((record) => record.videoId)).toEqual(["history-new"]);
     expect(collector.snapshot.directSync.watch_history).toBe(false);
@@ -1322,7 +1322,7 @@ describe("DouyinCollector direct records", () => {
       has_more: 0,
     }));
 
-    await collector.runDirectRecords(1);
+    await collector.runDirectRecords(1, { full: true });
 
     expect(collector.snapshot.records.watch_history).toHaveLength(81);
     expect(collector.snapshot.records.watch_history.map((record) => record.videoId)).toContain("history-new");
@@ -1395,7 +1395,7 @@ describe("DouyinCollector concurrent HTTP work", () => {
       return { ...emptySnapshot(), records: structuredClone(records), updatedAt: "2026-08-09T00:10:00.000Z" };
     });
 
-    await collector.runDirectRecords(1);
+    await collector.runDirectRecords(1, { full: true });
 
     // 第一页读完就已经存过一次，不用等整份观看历史读完
     expect(saved.slice(0, 2)).toEqual([1, 2]);

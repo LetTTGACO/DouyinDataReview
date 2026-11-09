@@ -311,7 +311,7 @@ describe("browser login HTTP handshake", () => {
     expect(back.body.candidate).toMatchObject({ accountId: "default", newAccount: false });
     expect((await call("/v1/browser/confirm", "POST", { id: back.body.candidate.id })).body.activeId).toBe("default");
     expect(readRecords.mock.contexts.map(collector => collector.getStatus().account.id)).toEqual(["default", otherId, "default"]);
-    expect(readRecords.mock.calls.map(([, options]) => options.full)).toEqual([false, true, false]);
+    expect(readRecords.mock.calls.map(([, options]) => options.full)).toEqual([false, false, false]);
   });
   // 旧版或先并入备份文件留下的账号：有记录、没绑定抖音号
   const unboundRecords = dir => writeFile(path.join(dir, "records.json"), JSON.stringify({ schemaVersion: 2, updatedAt: null, chatMessages: [], chatConversations: [], warnings: [],

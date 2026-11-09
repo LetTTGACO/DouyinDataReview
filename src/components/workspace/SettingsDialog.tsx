@@ -274,7 +274,7 @@ function Reading({ autoSyncEnabled, onToggleAutoSync, onToggleOpenAtLogin, openA
     <>
       <View style={styles.row}>
         <RowCopy
-          detail={videosAllowed ? "开着时，回到窗口或刚连上采集器，会补读新的观看、喜欢和收藏记录。导入凭据时勾选读取视频，会自动完整读取一次。" : "当前账号未开启视频读取，自动补读不执行。在设置 → 账号中重新导入凭据并勾选读取视频可开启。"}
+          detail={videosAllowed ? "开着时，回到窗口或刚连上采集器，会补读新的观看、喜欢和收藏记录。首次读取观看历史最近 7 天、喜欢和收藏各最多 200 条，之后遇到本地已有记录就停止。需要更多历史可手动完整读取。" : "当前账号未开启视频读取，自动补读不执行。在设置 → 账号中重新导入凭据并勾选读取视频可开启。"}
           title="自动补读新记录"
         />
         <Toggle disabled={!videosAllowed} label="自动补读新记录" onPress={onToggleAutoSync} testID="settings-auto-sync" value={autoSyncEnabled && videosAllowed} />

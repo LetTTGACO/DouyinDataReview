@@ -267,7 +267,7 @@ export function tipNotes(state: TipInput, layout: "sketch" | "minimal" = "sketch
           ? { title: "正在读取", body: "随时可以点「停止读取」停下，已经读到的会先存好。" }
           : state.ready
             ? { title: "可以打开报告了", body: state.autoSyncEnabled ? "右上角「打开报告」看这些记录。应用回到前台时会自动补读新的记录。" : "右上角「打开报告」看这些记录。自动读取已暂停，想更新就点「增量读取」。" }
-            : { title: "连上了，下一步读取", body: "「增量读取」在后台读最近的记录，不弹窗口；「完整读取」会从头翻一遍，要久一些。" };
+            : { title: "连上了，下一步读取", body: "「增量读取」首次读观看历史最近 7 天、喜欢和收藏各最多 200 条，之后只补新增；「完整读取」会从头翻一遍，要久一些。" };
   return [
     { key: "tip", ...tip },
     { key: "privacy", title: "只存在这台电脑上", body: "采集器只在本机运行，读到的记录都存在这台电脑里，不上传。" },

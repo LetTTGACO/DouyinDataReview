@@ -747,7 +747,7 @@ export class RecordAccumulator {
     return this.indexes[type].get(id);
   }
 
-  addResponse(endpoint, payload) {
+  addResponse(endpoint, payload, { selectRecords = (records) => records } = {}) {
     const normalized = normalizeDouyinResponse(endpoint, payload);
     if (endpoint.kind === "favorite_folders") {
       for (const folder of normalized.folders) this.folders.set(folder.id, folder);
@@ -759,7 +759,7 @@ export class RecordAccumulator {
         pagination: normalized.pagination,
       };
     }
-    const acceptedRecords = normalized.records;
+    const acceptedRecords = selectRecords(normalized.records);
     const acceptedIds = new Set(acceptedRecords.map((record) => record.id));
     return {
       added: this.addRecords(endpoint.kind === "live_history" ? "watch_history" : endpoint.kind, acceptedRecords),
@@ -767,7 +767,9 @@ export class RecordAccumulator {
       pageFingerprint: fingerprintRecordPage(normalized.records),
       recordIds: normalized.records.map((record) => record.id),
       acceptedRecordIds: [...acceptedIds],
-      rejectedRecordIds: normalized.records.flatMap((record) => acceptedIds.has(record.id) ? [] : [record.id]),
+      // 范围之外的记录只是本次没读取，不能当成已取消的喜欢或收藏从本地删除。
+      rejectedRecordIds: [],
+      excludedCount: normalized.records.length - acceptedRecords.length,
       type: endpoint.kind,
       pagination: normalized.pagination,
     };

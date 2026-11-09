@@ -1204,7 +1204,7 @@ function AppContent() {
     syncConfirmationOpenRef.current = true;
     confirmAlert(
       "增量读取",
-      "尚未建立边界的分类会读取全部可见记录；已有边界的分类只读取到本地已知记录为止。使用已导入的凭据读取，凭据失效时请到设置 → 账号中重新连接浏览器并导入。",
+      "首次读取观看历史最近 7 天、喜欢和收藏各最多 200 条；之后补读新增记录，遇到本地已有记录就停止。需要更多历史时可手动选择「完整读取」。",
       "读取新记录",
       (confirmed) => {
         syncConfirmationOpenRef.current = false;
@@ -1498,7 +1498,7 @@ function AppContent() {
     const whose = rows.length > 1 && name ? `「${name}」` : "";
     confirmAlert(
       "清除本地缓存",
-      `将清除${whose}本地保存的观看、喜欢和收藏记录。抖音登录状态、Cookie 和账号中的记录不会受影响；下一次读取将重新获取全部可见记录。`,
+      `将清除${whose}本地保存的观看、喜欢和收藏记录。抖音登录状态、Cookie 和账号中的记录不会受影响；下一次日常读取将获取观看历史最近 7 天、喜欢和收藏各最多 200 条。`,
       "清除缓存",
       (confirmed) => {
         if (!confirmed) return;

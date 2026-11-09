@@ -55,6 +55,9 @@ const HOME_URL = "https://www.douyin.com/";
 const SELF_PROFILE_URL = "https://www.douyin.com/user/self";
 const LOGIN_COOKIE_NAMES = new Set(["sessionid", "sessionid_ss", "sid_tt", "sid_guard"]);
 const REQUIRED_TYPES = ["watch_history", "liked_videos", "favorite_videos"];
+const INITIAL_HISTORY_DAYS = 7;
+const INITIAL_LIST_LIMIT = 200;
+const INITIAL_RECORDS_WARNING = "首次读取范围：观看历史最近 7 天，喜欢和收藏各最多 200 条；需要更多历史时可手动完整读取。";
 const TYPE_LABELS = { watch_history: "观看历史", liked_videos: "点赞列表", favorite_videos: "收藏列表" };
 // 某一类接口给的东西用不了、或者翻不下去时只跳过这一类（抖音桌面端的登录态读点赞就回空响应）；
 // 登录失效、限流、要验证这些是整个会话的问题，照旧停下
@@ -284,7 +287,7 @@ export function labelWatchCompletion(records, completed, coveredFromMs) {
 }
 
 // 直播观看历史通过 HTTP 按游标分页。
-async function collectLiveHistoryRecords(context) {
+async function collectLiveHistoryRecords(context, { sinceMs = -Infinity } = {}) {
   const endpoint = { kind: "live_history", pathname: "/webcast/feed/" };
   {
     const records = [], seen = new Set(); let cursor = "0";
@@ -293,7 +296,8 @@ async function collectLiveHistoryRecords(context) {
       seen.add(cursor);
       const payload = await context.request(endpoint.pathname, { query: { request_tag_from: "web", need_map: "1", source_key: "drawer_hot_live_history", app_name: "douyin_web", live_id: "1", language: "zh-CN", max_time: cursor }, referer: `${SELF_PROFILE_URL}?showTab=record` });
       const result = normalizeDouyinResponse(endpoint, payload);
-      records.push(...result.records);
+      records.push(...result.records.filter(record => sinceMs === -Infinity || Date.parse(record.occurredAt ?? "") >= sinceMs));
+      if (result.records.some(record => Date.parse(record.occurredAt ?? "") < sinceMs)) return records;
       if (result.pagination.hasMore === false) return records;
       if (!/^\d{1,20}$/u.test(result.pagination.cursor ?? "")) throw new DirectHistoryError("pagination_missing", "直播观看记录缺少下一页游标。");
       cursor = result.pagination.cursor; await delay(300);
@@ -1297,6 +1301,7 @@ export class DouyinCollector {
       : [];
     this.snapshot = await this.store.save(records, before.warnings, {
       directSync: before.directSync,
+      pendingWatchHistoryBoundary: before.pendingWatchHistoryBoundary,
       // 存盘时按编号去重，排在前面的本机消息优先
       chatMessages: [...before.chatMessages, ...(Array.isArray(data?.chatMessages) ? data.chatMessages : [])],
       chatConversations: mergeChatConversationSnapshots(conversations, before.chatConversations),
@@ -1772,7 +1777,10 @@ export class DouyinCollector {
   saveSnapshot(build) {
     const task = (this.saveChain ?? Promise.resolve()).catch(() => undefined).then(async () => {
       const [records, warnings, options] = build(this.snapshot);
-      this.snapshot = await this.store.save(records, warnings, options);
+      this.snapshot = await this.store.save(records, warnings, {
+        pendingWatchHistoryBoundary: this.snapshot.pendingWatchHistoryBoundary,
+        ...options,
+      });
       return this.snapshot;
     });
     this.saveChain = task;
@@ -1990,11 +1998,40 @@ export class DouyinCollector {
       const stagedRecords = structuredClone(existingRecords);
       const directSync = normalizeDirectSyncState(this.snapshot.directSync, this.snapshot.warnings);
       const incrementalByType = new Map(REQUIRED_TYPES.map((type) => [type, !full && directSync[type]]));
+      let pendingBoundary = this.snapshot.pendingWatchHistoryBoundary ?? null;
+      if (!full && pendingBoundary) incrementalByType.set("watch_history", true);
+      const initialByType = new Map(REQUIRED_TYPES.map(type => [type, !full && !incrementalByType.get(type)]));
+      const hasInitial = REQUIRED_TYPES.some(type => initialByType.get(type));
+      const historySince = Date.now() - INITIAL_HISTORY_DAYS * 86_400_000;
       const allIncremental = REQUIRED_TYPES.every((type) => incrementalByType.get(type));
       const knownIds = new Map(REQUIRED_TYPES.map((type) => [
         type,
         new Set(incrementalByType.get(type) ? existingRecords[type].map((record) => record.id) : []),
       ]));
+      // 中断后存下的第一页不能成为新的停止边界；继续读到中断前的旧边界。
+      if (!full && pendingBoundary) knownIds.set("watch_history", new Set([pendingBoundary]));
+      const initialIds = new Map(REQUIRED_TYPES.map(type => [type, new Set()]));
+      let historyReachedCutoff = false;
+      const selectPageRecords = (type, records) => {
+        if (!initialByType.get(type)) return records;
+        if (type === "watch_history") {
+          const dated = records.filter(record => record.occurredAtSource === "platform_action" && Number.isFinite(Date.parse(record.occurredAt ?? "")));
+          if (records.length && !dated.length) throw new DirectHistoryError("schema_changed", "观看历史缺少可靠观看时间，无法按最近 7 天读取。");
+          historyReachedCutoff = dated.some(record => Date.parse(record.occurredAt) < historySince);
+          return dated.filter(record => Date.parse(record.occurredAt) >= historySince);
+        }
+        const ids = initialIds.get(type);
+        return records.filter(record => {
+          if (ids.has(record.id)) return true;
+          if (ids.size >= INITIAL_LIST_LIMIT) return false;
+          ids.add(record.id);
+          return true;
+        });
+      };
+      const markHistoryPending = () => {
+        if (incrementalByType.get("watch_history")) pendingBoundary ??= existingRecords.watch_history.find(record => record.mediaType !== "live" && knownIds.get("watch_history").has(record.id))?.id ?? "watch_history:pending-empty";
+        else pendingBoundary = null;
+      };
       // knownIds 只给增量读取判断停在哪；「新增」要和本地已有的比，整份重读时也一样，否则读到的每条都算新的
       const existingIds = new Map(REQUIRED_TYPES.map((type) => [type, new Set(existingRecords[type].map((record) => record.id))]));
       const newIds = new Map(REQUIRED_TYPES.map((type) => [type, new Set()]));
@@ -2011,7 +2048,7 @@ export class DouyinCollector {
 
       const trackResult = (type, result) => {
         returnedCounts.set(type, returnedCounts.get(type) + result.pageSize);
-        filteredCounts.set(type, filteredCounts.get(type) + result.rejectedRecordIds.length);
+        filteredCounts.set(type, filteredCounts.get(type) + result.rejectedRecordIds.length + result.excludedCount);
         const fresh = result.acceptedRecordIds.filter((id) => !existingIds.get(type).has(id) && !newIds.get(type).has(id));
         for (const id of fresh) newIds.get(type).add(id);
         for (const id of result.rejectedRecordIds) rejectedIds.get(type).add(id);
@@ -2031,13 +2068,13 @@ export class DouyinCollector {
           accumulator.sortedRecords(type),
           knownIds.get(type),
           rejectedIds.get(type),
-          final,
+          final && !initialByType.get(type),
         ),
       });
       // 每读一页都要报数：新读到的不和本地重复，直接加，不用为一个数字把整份记录算一遍
       const liveCounts = (type) => ({ ...this.status.counts, [type]: existingRecords[type].length + newIds.get(type).size });
       const progressMessage = (type, pageCount) => (
-        `正在读取${TYPE_LABELS[type]}${incrementalByType.get(type) ? "新增" : "全部"}记录（第 ${pageCount} 页，接口 ${returnedCounts.get(type)} 条，新增 ${newIds.get(type).size} 条，过滤 ${filteredCounts.get(type)} 条）`
+        `正在读取${TYPE_LABELS[type]}${initialByType.get(type) ? type === "watch_history" ? "最近 7 天" : "最近 200 条" : incrementalByType.get(type) ? "新增" : "全部"}记录（第 ${pageCount} 页，接口 ${returnedCounts.get(type)} 条，新增 ${newIds.get(type).size} 条，过滤 ${filteredCounts.get(type)} 条）`
       );
       // 每读一段就落盘，工作台边采边能看到新记录；限流是因为快照要整份重写
       let nextProgressPersistAt = Date.now() + this.progressPersistIntervalMs;
@@ -2047,10 +2084,12 @@ export class DouyinCollector {
         if (Date.now() < nextProgressPersistAt) return;
         const persistStartedAt = Date.now();
         this.assertSyncActive(runId);
+        if (type === "watch_history" && newIds.get(type).size > 0) markHistoryPending();
         await this.saveSnapshot((snapshot) => [previewRecords(type), snapshot.warnings, {
           // 观看历史读到一半存下的新记录，下次增量读取会在它们身上停住，被打断时中间那段就再也补不回来。
-          // 存了新记录就先把它标成没读完，被打断的话下次整段重读（观看历史是合并，不会丢旧记录），读完再标回去
+          // 保存原来的停止边界，中断后从头补到它；首次读取中断则仍按首次范围重试。
           directSync: newIds.get(type).size > 0 ? { ...directSync, [type]: false } : directSync,
+          pendingWatchHistoryBoundary: pendingBoundary,
           chatMessages: snapshot.chatMessages,
           chatConversations: snapshot.chatConversations,
         }]);
@@ -2060,18 +2099,20 @@ export class DouyinCollector {
         nextProgressPersistAt = Date.now() + Math.max(this.progressPersistIntervalMs, persistMs >= 200 ? persistMs * 10 : 0);
       };
       const skipped = [];
-      // completed=false：这一类被跳过，「读完过」标记不动，下次再整份读
+      // 达到首次范围也算建立了增量边界；被跳过的分类下次按原范围重试。
       const persistCompletedType = async (type, finalPhase, { completed = true } = {}) => {
         this.assertSyncActive(runId);
         if (completed) {
           stagedRecords[type] = previewRecords(type, true)[type];
           directSync[type] = true;
+          if (type === "watch_history") pendingBoundary = null;
         }
         const newCounts = Object.fromEntries(REQUIRED_TYPES.map((kind) => [kind, newIds.get(kind).size]));
         const warnings = [...new Set([
           ...(finalPhase
             ? [`${DIRECT_COMPLETE_WARNING_PREFIX}新增观看 ${newCounts.watch_history}、点赞 ${newCounts.liked_videos}、收藏 ${newCounts.favorite_videos}；读取观看历史 ${pageCounts.watch_history} 页、点赞 ${pageCounts.liked_videos} 页、收藏 ${pageCounts.favorite_videos} 页。`]
             : completed ? [`无界面读取阶段完成：${TYPE_LABELS[type]}已保存，其他分类继续读取。`] : []),
+          ...(!full && (hasInitial || this.snapshot.warnings.includes(INITIAL_RECORDS_WARNING)) ? [INITIAL_RECORDS_WARNING] : []),
           ...skipped.map(({ kind, message, pages }) => (pages
             ? `${TYPE_LABELS[kind]}读到第 ${pages + 1} 页出错，已读到的先留下了，下次读取会再从头读一遍：${message}`
             : `${TYPE_LABELS[kind]}这次没读到，保留了本地原有的记录：${message}`)),
@@ -2081,6 +2122,7 @@ export class DouyinCollector {
         ])];
         await this.saveSnapshot((snapshot) => [stagedRecords, warnings, {
           directSync,
+          pendingWatchHistoryBoundary: pendingBoundary,
           chatMessages: snapshot.chatMessages,
           chatConversations: snapshot.chatConversations,
         }]);
@@ -2094,7 +2136,10 @@ export class DouyinCollector {
       const skipType = async (type, error, readPages, finalPhase) => {
         if (!SKIPPABLE_LIST_ERRORS.has(error?.code)) throw error;
         const kept = readPages > 0 && (type === "watch_history" || !incrementalByType.get(type));
-        if (kept) { stagedRecords[type] = previewRecords(type)[type]; directSync[type] = false; }
+        if (kept) {
+          stagedRecords[type] = previewRecords(type)[type]; directSync[type] = false;
+          if (type === "watch_history") markHistoryPending();
+        }
         pageCounts[type] = kept ? readPages : 0;
         skipped.push({ kind: type, message: error.message, pages: kept ? readPages : 0 });
         await persistCompletedType(type, finalPhase, { completed: false });
@@ -2107,7 +2152,7 @@ export class DouyinCollector {
           try {
             pageCounts[type] = await this.collectDirectList(context, type, async (payload, pageCount) => {
               this.assertSyncActive(runId);
-              const result = accumulator.addResponse(endpoint, payload);
+              const result = accumulator.addResponse(endpoint, payload, { selectRecords: records => selectPageRecords(type, records) });
               trackResult(type, result);
               this.updateStatus({
                 phase: type,
@@ -2119,7 +2164,8 @@ export class DouyinCollector {
               await persistProgress(type);
               await this.yieldToForeground(() => runId !== this.syncRunId);
               this.assertSyncActive(runId);
-              return !result.recordIds.some((id) => knownIds.get(type).has(id));
+              return !result.recordIds.some((id) => knownIds.get(type).has(id))
+                && !(initialByType.get(type) && initialIds.get(type).size >= INITIAL_LIST_LIMIT);
             });
           } catch (error) {
             await skipType(type, error, readPages, phaseIndex === phases.length - 1);
@@ -2141,7 +2187,7 @@ export class DouyinCollector {
             cursors.add(cursor);
             const payload = await retryBadPage(() => this.readDirectHistory(context, cursor));
             this.assertSyncActive(runId);
-            const result = accumulator.addResponse(endpoint, payload);
+            const result = accumulator.addResponse(endpoint, payload, { selectRecords: records => selectPageRecords(type, records) });
             trackResult(type, result);
             pageCounts[type] += 1;
             if (type === "watch_history") missingViewTimes += countMissingDirectHistoryViewTimes(payload);
@@ -2156,6 +2202,7 @@ export class DouyinCollector {
               newRecords: newRecordsStatus(),
             });
             await persistProgress(type);
+            if (historyReachedCutoff) break;
             if (result.recordIds.some((id) => knownIds.get(type).has(id))) break;
             if (result.pagination.hasMore === false) break;
             if (result.pagination.hasMore !== true || !result.pagination.cursor) {
@@ -2173,13 +2220,14 @@ export class DouyinCollector {
       }
       // 直播记录只是观看历史的附加分栏：改版、读不到都不影响上面已经存好的视频记录
       this.updateStatus({ phase: "watch_history", message: "正在读取看过的直播" });
-      const liveRecords = await collectLiveHistoryRecords(context).catch(() => []);
+      const liveRecords = await collectLiveHistoryRecords(context, { sinceMs: full ? -Infinity : historySince }).catch(() => []);
       this.assertSyncActive(runId);
       const withLive = mergeRecordList("watch_history", stagedRecords.watch_history, liveRecords);
       const liveAdded = withLive.length - stagedRecords.watch_history.length;
       const saveStaged = async () => {
         await this.saveSnapshot((snapshot) => [stagedRecords, snapshot.warnings, {
           directSync,
+          pendingWatchHistoryBoundary: pendingBoundary,
           chatMessages: snapshot.chatMessages,
           chatConversations: snapshot.chatConversations,
         }]);
@@ -2191,7 +2239,7 @@ export class DouyinCollector {
       }
       // 看完标记也是附加信息：读不到就沿用按时间的估算，不影响上面已经存好的记录
       this.updateStatus({ phase: "watch_history", message: "正在读取看完标记" });
-      const completion = await this.readCompletedWatchTimes(context, runId, completionScanFloor(stagedRecords.watch_history))
+      const completion = await this.readCompletedWatchTimes(context, runId, Math.max(completionScanFloor(stagedRecords.watch_history), full ? -Infinity : historySince))
         .catch((error) => {
           if (error instanceof CollectorCancelledError) throw error;
           return null;
@@ -2222,7 +2270,9 @@ export class DouyinCollector {
         progress: null,
         message: (allIncremental
           ? `已读取新增记录（观看 ${newCounts.watch_history}、点赞 ${newCounts.liked_videos}、收藏 ${newCounts.favorite_videos}${liveAdded > 0 ? `、直播 ${liveAdded}` : ""}${repliesAdded > 0 ? `、评论回复 ${repliesAdded}` : ""}）`
-          : `已读取并合并全部可见记录（观看 ${stagedRecords.watch_history.length}、点赞 ${stagedRecords.liked_videos.length}、收藏 ${stagedRecords.favorite_videos.length}）`)
+          : full
+            ? `已读取并合并全部可见记录（观看 ${stagedRecords.watch_history.length}、点赞 ${stagedRecords.liked_videos.length}、收藏 ${stagedRecords.favorite_videos.length}）`
+            : `已完成首次范围读取（观看历史最近 7 天，喜欢和收藏各最多 200 条；新增观看 ${newCounts.watch_history}、点赞 ${newCounts.liked_videos}、收藏 ${newCounts.favorite_videos}）`)
           + skipped.map(({ kind, message, pages }) => `；${TYPE_LABELS[kind]}${pages ? `在第 ${pages + 1} 页停下了` : "这次没读到"}（${message.replace(/。$/u, "")}）`).join(""),
         counts: recordCounts(this.snapshot.records, this.snapshot.chatMessages, this.snapshot.chatConversations),
         updatedAt: this.snapshot.updatedAt,
