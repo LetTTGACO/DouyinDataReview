@@ -685,7 +685,9 @@ function ChatDetailPane({
   const [cardOpen, setCardOpen] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const stickToBottomRef = useRef(true);
+  const [localLimit, setLocalLimit] = useState(CHAT_MESSAGE_RENDER_LIMIT);
   const [remoteEnabled, setRemoteEnabled] = useState(false);
+  const localKeepFromBottom = useRef<number | null>(null);
   const group = row?.kind === "group" && (remoteEnabled || !row.messages.length) && live ? live : null;
   const groupMessages = useGroupMessages(group, row?.id ?? null);
 
@@ -715,6 +717,12 @@ function ChatDetailPane({
     } else if (firstGroupPageRef.current || stickToBottomRef.current) scrollToBottom();
     firstGroupPageRef.current = false;
   }, [groupMessages.messages]);
+  useLayoutEffect(() => {
+    const node = messageListRef.current?.getScrollableNode?.();
+    if (localKeepFromBottom.current === null || typeof node?.scrollHeight !== "number") return;
+    node.scrollTop = (node.firstElementChild?.offsetHeight ?? node.scrollHeight) - localKeepFromBottom.current;
+    localKeepFromBottom.current = null;
+  }, [localLimit]);
 
   if (!row) {
     return (
@@ -736,12 +744,18 @@ function ChatDetailPane({
       setExportError(null);
     } catch (error) { setExportError(error instanceof Error ? error.message : "导出失败，请重试。"); }
   };
-  const localMessages = row.messages.slice(-CHAT_MESSAGE_RENDER_LIMIT);
+  const localMessages = row.messages.slice(-localLimit);
   const visibleMessages = group
     ? [...new Map([...localMessages, ...groupMessages.messages].map(message => [message.id, message])).values()]
       .sort((left, right) => messageTime(left.sentAt) - messageTime(right.sentAt))
     : localMessages;
   const omitted = row.messages.length - localMessages.length;
+  const loadLocalOlder = () => {
+    const node = messageListRef.current?.getScrollableNode?.();
+    stickToBottomRef.current = false;
+    localKeepFromBottom.current = typeof node?.scrollHeight === "number" ? (node.firstElementChild?.offsetHeight ?? node.scrollHeight) - node.scrollTop : null;
+    setLocalLimit(limit => limit + CHAT_MESSAGE_RENDER_LIMIT);
+  };
   const loadOlder = () => {
     const node = messageListRef.current?.getScrollableNode?.();
     groupMessages.loadOlder(typeof node?.scrollHeight === "number" ? (node.firstElementChild?.offsetHeight ?? node.scrollHeight) - node.scrollTop : null);
@@ -814,11 +828,12 @@ function ChatDetailPane({
           keyExtractor={(item) => item.id}
           ListEmptyComponent={group ? <Text style={styles.messageLimitNotice}>{groupMessages.error ?? "正在从抖音读取群消息…"}</Text> : <MessageListEmpty privacy={privacy} />}
           ListHeaderComponent={<>
-            {omitted > 0 ? <Text style={styles.messageLimitNotice}>仅显示最近 {CHAT_MESSAGE_RENDER_LIMIT} 条，另有 {omitted} 条更早消息保留在本地快照中。</Text> : !group ? <ConversationDateDivider /> : null}
-            {group ? (visibleMessages.length ? <GroupHistoryHeader error={groupMessages.error} hasMore={groupMessages.hasMore} loading={groupMessages.loading} onLoad={loadOlder} /> : null)
+            {omitted > 0 ? <Pressable accessibilityRole="button" onPress={loadLocalOlder} style={[styles.groupHistoryHead, webPointer]} testID="chat-local-older">
+              <Text style={[styles.messageLimitNotice, styles.groupHistoryLink]}>加载更早的本地消息（还有 {omitted} 条）</Text>
+            </Pressable> : group ? <GroupHistoryHeader error={groupMessages.error} hasMore={groupMessages.hasMore} loading={groupMessages.loading} onLoad={loadOlder} />
               : row.kind === "group" && live ? <Pressable accessibilityRole="button" onPress={() => { setRemoteEnabled(true); }} style={[styles.groupHistoryHead, webPointer]} testID="chat-group-fetch-older">
                 <Text style={[styles.messageLimitNotice, styles.groupHistoryLink]}>从抖音补读历史</Text>
-              </Pressable> : null}
+              </Pressable> : <ConversationDateDivider />}
           </>}
           // 群消息是用户自己一页页翻出来的，全部渲染，免得虚拟列表估高让插入的旧消息跳位
           initialNumToRender={Math.max(CHAT_MESSAGE_RENDER_LIMIT, visibleMessages.length)}

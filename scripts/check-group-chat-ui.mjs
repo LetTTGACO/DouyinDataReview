@@ -55,12 +55,12 @@ try {
   await page.getByRole("button", { name: "进入工作台", exact: true }).click();
   await page.getByRole("tab", { name: /^聊天/ }).click();
   await page.locator('[data-testid="chat-conversation-101"]').click();
-  await page.getByText("仅显示最近 320 条，另有 80 条更早消息保留在本地快照中。", { exact: true }).waitFor();
-  await page.locator('[data-testid="chat-detail-pane"]').getByText("合成消息-399", { exact: true }).waitFor();
-  assert.equal(await page.locator('[data-testid="chat-detail-pane"]').getByText("合成消息-000", { exact: true }).count(), 0, "The local view retains the existing 320-message limit");
-  assert.equal(await page.locator('[data-testid="chat-local-older"]').count(), 0, "The allowlist feature has no local pagination control");
+  const older = page.locator('[data-testid="chat-local-older"]');
+  await older.waitFor({ timeout: 5_000 });
   assert.equal(remoteReads, 0, "Opening a stored group must read local data first");
-  assert.equal(JSON.parse(await readFile(path.join(directory, "records.json"), "utf8")).chatMessages.length, 400, "The UI limit must not remove stored history");
+  await older.click();
+  await page.getByText("合成消息-000", { exact: true }).waitFor();
+  assert.equal(remoteReads, 0, "Paging through stored history must not fetch Douyin");
   const remote = page.locator('[data-testid="chat-group-fetch-older"]');
   await remote.waitFor();
   const response = page.waitForResponse(result => new URL(result.url()).pathname === "/v1/chat/messages" && result.request().method() === "POST");
@@ -69,7 +69,7 @@ try {
   await page.waitForFunction(() => document.body.innerText.includes("没有更早的消息了"));
   assert.ok(remoteReads > 0, "The explicit fetch action must reach the remote read endpoint");
   assert.ok(await page.getByText("合成消息-000", { exact: true }).count(), "A remote page must not replace stored history");
-  console.log("PASS: local view shows the latest 320 of 400 stored messages; remote reads require the explicit action");
+  console.log("PASS: 400 local messages remain pageable; remote reads require the explicit action");
   await page.locator('[data-testid="chat-conversation-202"]').click();
   await page.locator('[data-testid="chat-detail-pane"]').getByText("待授权的群消息", { exact: true }).waitFor();
   const readsBeforeChange = remoteReads, initializationsBeforeChange = initializations;
