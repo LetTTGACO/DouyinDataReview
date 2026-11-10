@@ -142,6 +142,17 @@ const row = ({ list, record }) => ({
   ...(typeof record.watchCompleted === "boolean" ? { watchedToEnd: record.watchCompleted } : {}),
 });
 
+function chatShare(share) {
+  let videoId = null;
+  try {
+    const url = new URL(share.url);
+    if (url.protocol === "https:" && (url.hostname === "douyin.com" || url.hostname.endsWith(".douyin.com")))
+      videoId = url.pathname.match(/^\/(?:video|note)\/(\d{5,30})\/?$/u)?.[1] ?? null;
+  } catch { /* 短链接和缺少链接的旧记录保持原样，不联网补查。 */ }
+  return { title: share.title ?? null, author: share.author ?? null, coverUrl: share.coverUrl ?? null, url: share.url ?? null,
+    ...(videoId ? { videoId } : {}) };
+}
+
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 /** 按某个维度数条数，取前 top 个。 */
@@ -376,7 +387,7 @@ export const TOOLS = [
   },
   {
     kind: "read",
-    def: fn("read_chat", "读取本机保存的聊天消息，按时间从旧到新，默认最近 50 条。好友消息使用本工具。" + GROUP_READ_RULE, {
+    def: fn("read_chat", "读取本机保存的聊天消息，按时间从旧到新，默认最近 50 条。分享卡片返回 share（title、author、coverUrl、url，以及能从链接识别时的 videoId），图片和表情返回 mediaUrl，分享评论返回 comment。可用 share.videoId 查询作品详情；仅读本地已有信息，不联网补查。好友消息使用本工具。" + GROUP_READ_RULE, {
       conversationId: { type: "string" },
       before: { type: "string", description: "只看这个时间以前的，用来往前翻" },
       limit: { type: "integer", description: "默认 50，最多 100" },
@@ -397,6 +408,11 @@ export const TOOLS = [
           ...(message.text ? { text: message.text } : {}),
           ...(message.type && message.type !== "text" ? { kind: message.type } : {}),
           ...(message.share?.title ? { shared: message.share.title } : {}),
+          ...(message.share ? { share: chatShare(message.share) } : {}),
+          ...(message.mediaUrl ? { mediaUrl: message.mediaUrl } : {}),
+          ...(message.comment ? { comment: { id: message.comment.id ?? null, author: message.comment.author ?? null,
+            text: message.comment.text ?? null, mediaUrl: message.comment.mediaUrl ?? null, mediaType: message.comment.mediaType ?? null,
+            ...(message.comment.sourceType ? { sourceType: message.comment.sourceType } : {}) } } : {}),
           ...(message.callDurationSeconds ? { callSeconds: message.callDurationSeconds } : {}),
         })),
       };
