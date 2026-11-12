@@ -3,11 +3,11 @@ import { ActivityIndicator, Image, Linking, Modal, Platform, Pressable, ScrollVi
 import Svg, { Circle } from "react-native-svg";
 import { Check, Copy, Download, FolderOpen, Puzzle, RefreshCw, Trash2, UserRoundPlus, X, type LucideIcon } from "lucide-react-native";
 
-import { canDragDesktopExtension, getDesktopOpenAtLogin, getDesktopVideoDownloadDirectory, openDesktopVideoDownloadDirectory, setDesktopOpenAtLogin, startDesktopExtensionDrag, type DesktopUpdateState } from "../../desktopRuntime";
+import { canDragDesktopExtension, getDesktopOpenAtLogin, getDesktopQuitOnClose, getDesktopVideoDownloadDirectory, openDesktopVideoDownloadDirectory, setDesktopOpenAtLogin, setDesktopQuitOnClose, startDesktopExtensionDrag, type DesktopUpdateState } from "../../desktopRuntime";
 import { APP_STYLES, loadAppStyleFonts, loadFeedWords, saveFeedWords, STORY_STYLES, type AppStyle, type StoryStyle } from "../../services/appStyle";
 import { readFeedPreferences } from "../../services/feedPreferences";
 import { usageAutoSettings, type UsageAutoSettings } from "../../services/usageSessions";
-import { DEFAULT_ASSISTANT_CONFIG, getMcpClient, isLocalAiRuntime, loadAssistantConfig, mcpCommands, saveAssistantConfig, type AssistantConfig, type McpClient } from "../../services/assistant";
+import { DEFAULT_ASSISTANT_CONFIG, getMcpClient, isLocalAiRuntime, loadAssistantConfig, loadVideoModelConfig, mcpCommands, saveAssistantConfig, saveVideoModelConfig, type AssistantConfig, type McpClient, type VideoModelConfig } from "../../services/assistant";
 import { AiRuntimeField } from "./AiRuntimeField";
 import { confirmAlert } from "../../services/confirmAlert";
 import {
@@ -108,6 +108,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsSection>(section ?? "appearance");
   // 「开机后在后台运行」：null = 不是桌面版、旧版外壳或系统不支持，这一行不显示。挂载时就先问一次，打开「读取」页时这一行已经在了
   const [openAtLogin, setOpenAtLogin] = useState<boolean | null>(null);
+  // 「关闭窗口时退出应用」：同上，null 就不显示
+  const [quitOnClose, setQuitOnClose] = useState<boolean | null>(null);
 
   // 每次打开都回到指定的那一页（没指定就是外观），不接着上次关掉时那页
   useEffect(() => {
@@ -117,6 +119,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
   useEffect(() => {
     let live = true;
     void getDesktopOpenAtLogin().then((value) => { if (live) setOpenAtLogin(value); });
+    void getDesktopQuitOnClose().then((value) => { if (live) setQuitOnClose(value); });
     return () => { live = false; };
   }, [visible]);
 
@@ -132,6 +135,12 @@ export function SettingsDialog(props: SettingsDialogProps) {
     const next = !openAtLogin;
     setOpenAtLogin(next);
     void setDesktopOpenAtLogin(next).then((actual) => setOpenAtLogin(actual ?? !next));
+  };
+  const toggleQuitOnClose = () => {
+    if (quitOnClose === null) return;
+    const next = !quitOnClose;
+    setQuitOnClose(next);
+    void setDesktopQuitOnClose(next).then((actual) => setQuitOnClose(actual ?? !next));
   };
 
   return (
@@ -183,7 +192,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           {/* key 跟着页走：换页时滚动位置回到顶 */}
           <ScrollView contentContainerStyle={styles.body} key={tab} style={styles.scroll} testID={`settings-section-${tab}`}>
             {tab === "appearance" ? <Appearance {...props} contentWidth={contentWidth} />
-              : tab === "reading" ? <Reading {...props} openAtLogin={openAtLogin} onToggleOpenAtLogin={toggleOpenAtLogin} />
+              : tab === "reading" ? <Reading {...props} openAtLogin={openAtLogin} onToggleOpenAtLogin={toggleOpenAtLogin} quitOnClose={quitOnClose} onToggleQuitOnClose={toggleQuitOnClose} />
                 : tab === "privacy" ? <Privacy {...props} />
                   : tab === "account" ? <Account {...props} />
                     : tab === "data" ? <Data {...props} />
@@ -268,7 +277,7 @@ function Appearance({ appStyle, contentWidth, onChangeAppStyle, onChangeStorySty
   );
 }
 
-function Reading({ autoSyncEnabled, onToggleAutoSync, onToggleOpenAtLogin, openAtLogin, browserConnection, collector, appStyle }: SettingsDialogProps & { openAtLogin: boolean | null; onToggleOpenAtLogin: () => void }) {
+function Reading({ autoSyncEnabled, onToggleAutoSync, onToggleOpenAtLogin, openAtLogin, onToggleQuitOnClose, quitOnClose, browserConnection, collector, appStyle }: SettingsDialogProps & { openAtLogin: boolean | null; onToggleOpenAtLogin: () => void; quitOnClose: boolean | null; onToggleQuitOnClose: () => void }) {
   const videosAllowed = browserConnection?.status?.readPermissions?.videos !== false;
   return (
     <>
@@ -286,6 +295,15 @@ function Reading({ autoSyncEnabled, onToggleAutoSync, onToggleOpenAtLogin, openA
             title="开机后在后台运行"
           />
           <Toggle label="开机后在后台运行" onPress={onToggleOpenAtLogin} testID="settings-open-at-login" value={openAtLogin} />
+        </View>
+      ) : null}
+      {quitOnClose !== null ? (
+        <View style={styles.row}>
+          <RowCopy
+            detail="关着时，点关闭只是把窗口收进菜单栏或托盘，应用留在后台。开着时点关闭就完全退出，后台补读和聊天接收也跟着停。"
+            title="关闭窗口时退出应用"
+          />
+          <Toggle label="关闭窗口时退出应用" onPress={onToggleQuitOnClose} testID="settings-quit-on-close" value={quitOnClose} />
         </View>
       ) : null}
       <AutoUsageSettings collector={collector} appStyle={appStyle} />
@@ -368,7 +386,7 @@ function Privacy({ collector, onTogglePrivacy, privacy, accounts, onGroupChatSto
       </View>
       <View style={styles.row}>
         <RowCopy
-          detail={writesError ?? (writes === null ? "先在采集器页连上采集器，才能改这一项。"
+          detail={writesError ?? (writes === null ? "先在「连接与采集」连上采集器，才能改这一项。"
             : "打开后可以在工作台里点赞、收藏、关注和评论。这些别人都看得到，用的是你自己的抖音号，做得太多太快可能被抖音限制甚至封号，所以默认关着。回私信、分享给朋友和续火花不受这一项限制。")}
           title="允许在抖音上操作"
         />
@@ -437,7 +455,7 @@ function Account({ accountBlocked, accounts, activeAccountName, appStyle, connec
   if (!connected) {
     return (
       <View style={styles.row}>
-        <RowCopy detail="先在采集器页连上采集器，这里才能切换、添加或删除抖音账号。" title="抖音账号" />
+        <RowCopy detail="先在「连接与采集」连上采集器，这里才能切换、添加或删除抖音账号。" title="抖音账号" />
       </View>
     );
   }
@@ -484,8 +502,8 @@ function Account({ accountBlocked, accounts, activeAccountName, appStyle, connec
       {browserConnection ? <BrowserConnectionPanel {...browserConnection} visible={visible} blocked={blocked} />
         : onShowLogin ? <View style={styles.row}>
           {loginExpired
-            ? <RowCopy detail="抖音登录过期了或者要安全验证，搜索、下载和读取都停了。到采集器页首屏重新扫码就好。" title="登录失效了" />
-            : <RowCopy detail="在采集器页首屏扫码登录；也可以在那里改用 Chrome、Edge 或 Comet 导入。" title="登录与凭据" />}
+            ? <RowCopy detail="抖音登录过期了或者要安全验证，搜索、下载和读取都停了。到「连接与采集」重新扫码就好。" title="登录失效了" />
+            : <RowCopy detail="在「连接与采集」扫码登录；也可以在那里改用 Chrome、Edge 或 Comet 导入。" title="登录与凭据" />}
           <Button appStyle={appStyle} kind={loginExpired ? "primary" : "secondary"} label="去扫码登录" onPress={() => { onClose(); onShowLogin(); }} testID="settings-show-login" />
         </View> : null}
     </>
@@ -515,7 +533,7 @@ function Data({ appStyle, canClear, connected, onClearCache, onExportData }: Set
         <View style={styles.row}>
           <RowCopy
             detail={connected
-              ? "分别选择观看历史、喜欢、收藏和聊天数据，只把勾选的内容存成 JSON 文件，换电脑或重装以后可以在采集器页导入回来。"
+              ? "分别选择观看历史、喜欢、收藏和聊天数据，只把勾选的内容存成 JSON 文件，换电脑或重装以后可以在「连接与采集」导入回来。"
               : "连上采集器以后，可以把读到的记录存成一个文件，换电脑或重装以后再导入回来。"}
             title="导出数据"
           />
@@ -546,7 +564,7 @@ function extensionText(extension: FeedExtensionStatus, canDrag: boolean): string
   if (extension.lastSeenAt !== null) {
     const minutes = Math.floor((Date.now() - extension.lastSeenAt) / 60_000);
     const since = minutes < 1 ? "刚刚" : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.floor(minutes / 60)} 小时前` : `${Math.floor(minutes / 1440)} 天前`;
-    return `扩展已装好，${since}和应用对过一次（浏览器开着时每分钟一次）。应用带了新版扩展时，它会自己升级。`;
+    return `扩展已装好，${since}和应用对过一次（浏览器开着时每分钟一次）。应用带了新版扩展时，它会自己升级。${canDrag ? "要装到另一个浏览器，打开它的扩展页，把下面的图标拖进去。" : ""}`;
   }
   return canDrag
     ? "装一次就一直有效：先点右边打开浏览器的扩展页，第一次要打开扩展页右上角的「开发者模式」，再把下面的图标拖进扩展页。"
@@ -617,7 +635,7 @@ function FeedPage({ appStyle, feedShown, onToggleFeed, collector }: SettingsDial
         </View>
       </View>
       <View style={styles.row}>
-        <RowCopy detail="装好下面的扩展后，在浏览器的抖音首页和精选推荐中插入相关视频。使用浏览器登录的账号搜索，命中屏蔽词的不插入；搜索失败照常刷推荐。首次升级扩展后请刷新抖音页。" title="网页插入视频" />
+        <RowCopy detail="装好下面的扩展后，在浏览器的抖音首页和精选推荐、B 站首页推荐中插入相关视频。使用浏览器登录的账号搜索，命中屏蔽词的不插入；搜索失败照常刷推荐。首次升级扩展后请刷新抖音或 B 站页面。" title="网页插入视频" />
         <Button appStyle={appStyle} kind={webPicks ? "secondary" : "primary"} label={webPicks ? "关闭" : "开启"}
           disabled={busy || !baseUrl || !token} onPress={() => void save(!webPicks)} testID="settings-web-feed-picks" />
       </View>
@@ -660,7 +678,7 @@ function FeedFilter({ appStyle, collector }: SettingsDialogProps) {
     return () => { live = false; clearInterval(timer); };
   }, [baseUrl, token]);
   if (!baseUrl || !token) {
-    return <View style={styles.row}><RowCopy detail="先在采集器页连上采集器，才能改这一页。" title="推荐流过滤" /></View>;
+    return <View style={styles.row}><RowCopy detail="先在「连接与采集」连上采集器，才能改这一页。" title="推荐流过滤" /></View>;
   }
   const save = (change: Partial<Pick<FeedFilterSettings, "rules" | "mode">>) => {
     setSaving(true);
@@ -685,7 +703,7 @@ function FeedFilter({ appStyle, collector }: SettingsDialogProps) {
   return (
     <>
       <View style={[styles.row, styles.rowIntro]}>
-        <Text style={styles.detail}>软件里的「刷视频」会排除广告，并按这里的词条和过滤方式处理，不用装扩展。想在 Chrome、Edge 里刷抖音网页时也过滤，就装一次浏览器扩展。选「隐藏」可过滤带广告标识的视频，不用填写广告关键词；命中词条的视频也会过滤。应用没开时扩展按上次设置照常过滤，记录等应用开着时补传。网页上已经显示的首屏和作品详情只能记录命中，后续加载的推荐列表才会过滤。升级扩展后请刷新抖音页。</Text>
+        <Text style={styles.detail}>软件里的「刷视频」会排除广告，并按这里的词条和过滤方式处理，不用装扩展。想在 Chrome、Edge 里刷抖音网页时也过滤，就装一次浏览器扩展；装好后 B 站首页推荐也按同样的词条和过滤方式处理。选「隐藏」可过滤带广告标识的视频，不用填写广告关键词；命中词条的视频也会过滤。应用没开时扩展按上次设置照常过滤，记录等应用开着时补传。抖音网页上已经显示的首屏和作品详情只能记录命中，后续加载的推荐列表才会过滤；B 站首页首屏会直接藏掉命中的卡片。升级扩展后请刷新抖音或 B 站页面。</Text>
         {error ? <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text> : null}
       </View>
       <View style={[styles.row, styles.rowStacked]}>
@@ -708,14 +726,15 @@ function FeedFilter({ appStyle, collector }: SettingsDialogProps) {
             ))}
           </View>
         ) : null}
-        {canDrag && !installed ? (
+        {/* 装过一个浏览器后照样能拖：「已装好」只说明有浏览器对过，换个浏览器还要再装 */}
+        {canDrag ? (
           // 拖动交给桌面外壳：它把扩展文件夹交给系统拖放，放进开了开发者模式的扩展页就装上了
           <div draggable onDragStart={(event) => { event.preventDefault(); startDesktopExtensionDrag(); }} data-testid="settings-feed-drag"
             style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", cursor: "grab", userSelect: "none",
               border: `1px dashed ${color.border}`, borderRadius: radius.small as string, background: color.surfaceMuted }}>
             <Puzzle color={color.accent} size={22} strokeWidth={1.8} />
             <Text style={styles.rowTitle}>推荐流过滤扩展</Text>
-            <Text style={styles.detail}>按住拖进浏览器的扩展页</Text>
+            <Text style={styles.detail}>{installed ? "按住拖进另一个浏览器的扩展页" : "按住拖进浏览器的扩展页"}</Text>
           </div>
         ) : null}
       </View>
@@ -746,7 +765,7 @@ function FeedFilter({ appStyle, collector }: SettingsDialogProps) {
         {events.slice(-100).reverse().map((event, index) => (
           <View key={`${event.t}-${event.id}-${index}`} style={styles.feedEvent}>
             <Text numberOfLines={1} style={styles.detail}>
-              <Text style={styles.value}>{eventTime(event.t)}</Text>{`  ${FEED_ACTIONS[event.action]}  `}
+              <Text style={styles.value}>{eventTime(event.t)}</Text>{`  ${event.site === "bilibili" ? "B 站 · " : ""}${FEED_ACTIONS[event.action]}  `}
               <Text style={styles.rowTitle}>{event.desc || (event.id ? "（没有文案）" : "")}</Text>{event.author ? `  @${event.author}` : ""}
             </Text>
             {event.matched.length ? <Text numberOfLines={1} style={styles.detail}>{event.action === "inserted" ? "搜索词" : "命中"}：{event.matched.join("、")}</Text> : null}
@@ -766,6 +785,13 @@ function Assistant({ appStyle, assistantInstalled, collector, onToggleAssistant 
     saveAssistantConfig(next);
     return next;
   });
+  const [video, setVideo] = useState<VideoModelConfig>(() => loadVideoModelConfig());
+  const changeVideo = (patch: Partial<VideoModelConfig>) => setVideo((current) => {
+    const next = { ...current, ...patch };
+    saveVideoModelConfig(next);
+    return next;
+  });
+  const shared = isLocalAiRuntime(config.runtime) ? "" : "，留空用上面的";
   return (
     <>
       <View style={styles.row}>
@@ -775,8 +801,10 @@ function Assistant({ appStyle, assistantInstalled, collector, onToggleAssistant 
         />
         <Button appStyle={appStyle} kind={assistantInstalled ? "danger" : "primary"} label={assistantInstalled ? "移除" : "安装"} onPress={onToggleAssistant} testID="settings-assistant" />
       </View>
-      {assistantInstalled ? <>
+      {/* 模型不跟着「安装」藏起来：视频解析的学习笔记、分镜脚本没装 AI 助手也在用它 */}
+      <>
         <View style={[styles.row, styles.rowStacked]}>
+          <RowCopy detail="AI 助手和视频解析（学习笔记、分镜脚本）都用这个模型。" title="模型" />
           {/* 方舟的默认模型名本机 CLI 不认：切到本机就清空（用 CLI 自己的默认），切回接口再填回默认 */}
           <AiRuntimeField connection={connection} value={config.runtime ?? "api"} onChange={(runtime) => change(isLocalAiRuntime(runtime)
             ? { runtime, model: config.model === DEFAULT_ASSISTANT_CONFIG.model ? "" : config.model }
@@ -794,7 +822,19 @@ function Assistant({ appStyle, assistantInstalled, collector, onToggleAssistant 
             <Text style={styles.detail}>Key 只存在这台电脑上，每次对话随请求带给接口，不会写进应用的数据目录。</Text>
           </>}
         </View>
-      </> : null}
+        <View style={[styles.row, styles.rowStacked]} testID="settings-video-model">
+          <RowCopy
+            detail="可选。上面的模型收不了视频时，在这里另填一个能看视频的接口模型，分镜脚本会优先把整段视频交给它；不填，或者它也收不了，就由上面的模型逐张识别关键帧。"
+            title="分镜脚本的视频模型"
+          />
+          <TextInput accessibilityLabel="视频模型" autoCapitalize="none" onChangeText={(model) => changeVideo({ model })} placeholder="能看视频的模型名（留空就是不另配）" placeholderTextColor={color.textMuted}
+            style={styles.field} testID="settings-video-model-name" value={video.model} />
+          <TextInput accessibilityLabel="视频模型的接口地址" autoCapitalize="none" onChangeText={(baseUrl) => changeVideo({ baseUrl })} placeholder={`接口地址（OpenAI 兼容${shared}）`}
+            placeholderTextColor={color.textMuted} style={styles.field} testID="settings-video-model-url" value={video.baseUrl} />
+          <TextInput accessibilityLabel="视频模型的接口 Key" autoCapitalize="none" onChangeText={(apiKey) => changeVideo({ apiKey })} placeholder={`接口 Key${shared ? "（留空用上面的）" : ""}`} placeholderTextColor={color.textMuted}
+            secureTextEntry style={styles.field} testID="settings-video-model-key" value={video.apiKey} />
+        </View>
+      </>
       {connection ? <McpAccess appStyle={appStyle} connection={connection} /> : null}
     </>
   );

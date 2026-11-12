@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, session, shell, Tray } from "electron";
 import electronUpdater from "electron-updater";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,7 +11,6 @@ import { DesktopUpdateProvider } from "./updateProvider.mjs";
 import { DOWNLOAD_MIRRORS, RELEASE_REPOSITORY } from "../docs/downloadSources.mjs";
 import { syncFeedExtension } from "./feedExtension.mjs";
 import { createInAppBrowserConnector } from "./inAppBrowser.mjs";
-import { REELLAB_INBOX_URL, REELLAB_PROTOCOL, sendToReelLab } from "./reelLab.mjs";
 import { startStaticServer } from "./staticServer.mjs";
 import { isVideoDownload, readVideoDownloadDirectory, saveVideoCopies, uniqueSavePath, writeVideoDownloadDirectory } from "./videoDownloads.mjs";
 import { isSameOriginUrl, isStoryUrl } from "./windowPolicy.mjs";
@@ -29,6 +28,8 @@ const BACKGROUND_SYNC_MS = 3 * 60 * 60 * 1000;
 // Windows 的开机启动项靠这个参数认出自己，读写登录项设置时也要带同一组参数
 const HIDDEN_ARG = "--hidden";
 const LOGIN_ITEM = { args: [HIDDEN_ARG] };
+// 登录项只有 macOS 和 Windows 有；Linux 上托盘菜单和设置面板都不显示「开机后在后台运行」
+const LOGIN_ITEM_SUPPORTED = process.platform === "darwin" || process.platform === "win32";
 // 页面的设置（风格、自动补读等）存在 localStorage 里，而 localStorage 按 origin（含端口）分开存：
 // 端口每次随机的话，重启后就读不到上次的设置。所以页面服务优先用固定端口，绑不上（被占用、被系统保留）才退回随机端口。
 const WEB_PORT = DEVELOPMENT_USER_DATA ? 47661 : 47651;
@@ -62,6 +63,19 @@ app.setAppUserModelId(APP_ID);
 const videoDownloadSettings = path.join(userDataDirectory, "video-downloads.json");
 const videoDownloadDirectory = () => readVideoDownloadDirectory(videoDownloadSettings, path.join(app.getPath("downloads"), "抖音视频"));
 const savingVideos = new Set();
+
+// 「关闭窗口时退出应用」：和 tray-notice-shown 一样，用一个空文件当开关，有这个文件就是开着
+const quitOnCloseMarker = path.join(userDataDirectory, "quit-on-close");
+const quitOnClose = () => existsSync(quitOnCloseMarker);
+function setQuitOnClose(enabled) {
+  try {
+    if (enabled) writeFileSync(quitOnCloseMarker, "");
+    else rmSync(quitOnCloseMarker, { force: true });
+  } catch {
+    // 没写成就按磁盘上实际的状态回答，页面会把开关拨回去
+  }
+  return quitOnClose();
+}
 
 function openExternalUrl(value) {
   try {
@@ -184,13 +198,12 @@ function buildTrayMenu() {
     { label: "打开工作台", click: showMainWindow },
     { label: "现在读取一次新记录", click: () => requestBackgroundSync({ manual: true }) },
     { type: "separator" },
-    {
+    ...(LOGIN_ITEM_SUPPORTED ? [{
       label: "开机后在后台运行",
       type: "checkbox",
       checked: openAtLogin(),
       click: (item) => setOpenAtLogin(item.checked),
-    },
-    { type: "separator" },
+    }, { type: "separator" }] : []),
     { label: "退出", click: () => app.quit() },
   ]);
 }
@@ -241,9 +254,10 @@ function createMainWindow(appUrl, { hidden = false } = {}) {
     window.hide();
     syncWindowVisibility(window);
   };
-  // 关窗只是收进托盘，后台读取和聊天接收接着跑；真正退出走托盘菜单或 ⌘Q
+  // 关窗默认只是收进托盘，后台读取和聊天接收接着跑；真正退出走托盘菜单或 ⌘Q。
+  // 设置里开了「关闭窗口时退出应用」就放它关掉：closed → window-all-closed → app.quit()，照常走 before-quit 收尾
   window.on("close", (event) => {
-    if (quitting) return;
+    if (quitting || quitOnClose()) return;
     event.preventDefault();
     // macOS 全屏时直接隐藏会留下一整块黑屏，先退出全屏再收起来
     if (window.isFullScreen()) {
@@ -328,9 +342,7 @@ async function launch() {
   // electron-updater must be created after Electron is ready. In development
   // we intentionally do not touch its singleton, so `npm run desktop` never
   // tries to read a missing app-update.yml.
-  const updater = app.isPackaged && (process.platform === "win32" || process.platform === "darwin")
-    ? electronUpdater.autoUpdater
-    : null;
+  const updater = app.isPackaged ? electronUpdater.autoUpdater : null;
   if (updater) {
     const updateSession = session.fromPartition("electron-updater", { cache: false });
     const [owner, repo] = RELEASE_REPOSITORY.split("/");
@@ -363,13 +375,6 @@ async function launch() {
       updateInstallRequested = true;
     },
   });
-  // 「送去拆片工坊」：页面先让采集器下好视频，这里把文件复制进拆片工坊的收件箱再叫醒它（约定见 desktop/reelLab.mjs）
-  ipcMain.handle("desktop:send-to-reellab", (_event, request) => sendToReelLab(request, {
-    isInstalled: () => Boolean(app.getApplicationNameForProtocol(REELLAB_PROTOCOL)),
-    getDownloadFilePath: (jobId) => desktopRuntime?.collector.getDownloadFilePath(jobId) ?? null,
-    inboxDirectory: path.join(app.getPath("appData"), "ReelLab", "inbox"),
-    openInbox: () => shell.openExternal(REELLAB_INBOX_URL),
-  }));
   // 设置页上的扩展图标被拖起来：把扩展文件夹交给系统拖放，用户放进浏览器扩展页就装上了（开发者模式下浏览器认拖进来的文件夹）
   ipcMain.on("desktop:start-extension-drag", (event) => {
     try {
@@ -412,14 +417,15 @@ async function launch() {
   ipcMain.handle("desktop:install-app-update", () => appUpdateController?.install() ?? false);
   // 正常启动时页面挂载比窗口 show() 早，这时直接看 isVisible() 会答「不可见」，被当成后台启动
   ipcMain.handle("desktop:is-window-visible", () => lastOnScreen ?? !launchedHidden);
-  // 设置面板里的「开机后在后台运行」；登录项只有 macOS 和 Windows 有，别的平台答 null，页面就不显示这一行
-  const loginItemSupported = process.platform === "darwin" || process.platform === "win32";
-  ipcMain.handle("desktop:get-open-at-login", () => (loginItemSupported ? openAtLogin() : null));
+  // 设置面板里的「开机后在后台运行」；不支持登录项的平台答 null，页面就不显示这一行
+  ipcMain.handle("desktop:get-open-at-login", () => (LOGIN_ITEM_SUPPORTED ? openAtLogin() : null));
   ipcMain.handle("desktop:set-open-at-login", (_event, enabled) => {
-    if (!loginItemSupported) return null;
+    if (!LOGIN_ITEM_SUPPORTED) return null;
     if (typeof enabled !== "boolean") return openAtLogin();
     return setOpenAtLogin(enabled);
   });
+  ipcMain.handle("desktop:get-quit-on-close", () => quitOnClose());
+  ipcMain.handle("desktop:set-quit-on-close", (_event, enabled) => (typeof enabled === "boolean" ? setQuitOnClose(enabled) : quitOnClose()));
   // 后台读取碰到要重新登录、要可见浏览器的情况，不替用户弹浏览器，只提醒一次，等用户打开窗口再处理
   ipcMain.on("desktop:background-sync-blocked", (_event, message) => {
     if (isOnScreen(mainWindow) || backgroundBlockedNotified) return;

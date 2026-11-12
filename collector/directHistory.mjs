@@ -398,6 +398,7 @@ export const DIRECT_API_PATHS = new Set([
   "/aweme/v1/web/aweme/detail/", "/aweme/v1/web/aweme/post/",
   "/aweme/v1/web/aweme/favorite/", "/aweme/v1/web/aweme/listcollection/",
   "/aweme/v1/web/collects/list/", "/aweme/v1/web/collects/video/list/",
+  "/aweme/v1/web/collects/maintain/", "/aweme/v1/web/collects/video/move/",
   "/aweme/v1/web/comment/list/", "/aweme/v1/web/comment/list/reply/", "/aweme/v1/web/notice/",
   "/aweme/v1/web/discover/search/", "/aweme/v1/web/search/item/", "/aweme/v1/web/tab/feed/",
   "/aweme/v1/web/commit/item/digg/", "/aweme/v1/web/aweme/collect/",
@@ -449,8 +450,9 @@ export function directSignerProcessConfiguration({
   if (!runtimeDirectory || !runnerPath || !executablePath) {
     throw new DirectHistoryError("signer_failed", "评论回复签名器缺少运行路径。");
   }
-  if (platform !== "darwin" && platform !== "win32") {
-    throw new DirectHistoryError("unsupported_platform", "展开评论回复目前只支持 Windows 和 macOS。");
+  // Linux 和 Windows 一样只靠 Node 的权限边界，没有 macOS 那层系统沙箱
+  if (platform !== "darwin" && platform !== "win32" && platform !== "linux") {
+    throw new DirectHistoryError("unsupported_platform", "展开评论回复目前只支持 Windows、macOS 和 Linux。");
   }
   const resolvedRuntimeDirectory = path.resolve(runtimeDirectory);
   const resolvedRunnerPath = path.resolve(runnerPath);

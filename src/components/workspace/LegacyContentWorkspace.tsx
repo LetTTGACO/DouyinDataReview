@@ -46,7 +46,6 @@ import {
   Radio,
   RefreshCw,
   Search,
-  Send,
   Plug,
   Settings,
   Settings2,
@@ -55,6 +54,10 @@ import {
   Star,
   Trash2,
   TvMinimalPlay,
+  ChevronsUpDown,
+  ChevronDown,
+  UserRound,
+  UsersRound,
 } from "lucide-react-native";
 
 import type {
@@ -76,9 +79,11 @@ import Svg, { Circle } from "react-native-svg";
 import { ChatWorkspace } from "./ChatWorkspace";
 import { MyCommentsView } from "./MyCommentsView";
 import { RecordVideoPlayer, type RecordVideoLoader } from "./RecordVideoPlayer";
+import { VideoAnalysisBatchDialog, VideoAnalysisDialog } from "./VideoAnalysisPanel";
+import { videoAnalysisBatch } from "../../services/videoAnalysis";
 import { LiveRoomPlayer, type LiveTarget } from "./LiveRoomPlayer";
 import { liveRoomIdFrom, readFollowingLive, type LiveFollowing } from "../../services/liveRoom";
-import { waitForCollector } from "../../services/videoFeed";
+import { analysisVideoIdOf, waitForCollector } from "../../services/videoFeed";
 import { useRecordCover } from "../../services/recordCovers";
 import { BatchVideoDownloadDialog } from "./BatchVideoDownloadDialog";
 import { uniqueDownloadVideos, videoDownloadKey } from "../../services/batchVideoDownload";
@@ -86,6 +91,7 @@ import { BatchDownloadRangePicker } from "./BatchDownloadRangePicker";
 import { earliestRecordDate, searchRecords } from "../../services/recordSearch";
 import {
   ALL_FOLDERS,
+  DOUYIN_FOLDER_NAME_MAX,
   FOLDERS_MAX,
   UNFILED,
   addFolder,
@@ -104,6 +110,9 @@ import {
   type RecordFolders,
 } from "../../services/recordFolders";
 import { useContextMenu, type MenuEntry } from "./ContextMenu";
+import type { SettingsSection } from "./SettingsDialog";
+import { credentialsExpired, desktopLoginNeeded } from "./setupModel";
+import { isDesktopApp } from "../../desktopRuntime";
 import { BadgeWall } from "./AchievementShelf";
 import { noteAchievementWorks, countAchievement, unlockAchievement } from "./achievements";
 import { ReportDashboard } from "./ReportDashboard";
@@ -112,9 +121,11 @@ import { buildReportModel } from "./ReportWorkspace";
 import { alpha, workspaceColors as color, workspaceFonts as font, workspaceRadii as radius } from "./workspaceTheme";
 import { ease, easeImage, fx, useCountUp, useDraw, useInView, ws } from "./motion";
 
-export type WorkspaceViewKey = PersonalRecordType | "live" | "feed_filtered" | "comments" | "summary" | "highlights" | "chat" | "feed" | "explore" | "creator" | "assistant";
+export type WorkspaceViewKey = PersonalRecordType | "live" | "feed_filtered" | "comments" | "summary" | "highlights" | "chat" | "feed" | "explore" | "creator" | "assistant" | "sources";
 
 export interface ContentWorkspaceProps {
+  /** 连接与采集：嵌在外壳里的一页，自带顶栏；入口在侧栏底部的账号菜单 */
+  sources?: React.ReactNode;
   /** 刷视频：进工作台默认就是这一页 */
   feed?: React.ReactNode;
   explore?: React.ReactNode;
@@ -141,14 +152,10 @@ export interface ContentWorkspaceProps {
   onOpenRecord: (url: string) => Promise<void>;
   /** keepExplore：从播放器里下载时别关探索会话，评论面板还在用 */
   onDownloadRecord?: (record: PersonalVideoRecord, keepExplore?: boolean) => Promise<void>;
-  /** 送去拆片工坊：采集器下好视频，再由桌面外壳放进拆片工坊的收件箱；只有桌面版给 */
-  onSendToReelLab?: (record: PersonalVideoRecord) => void;
   onBatchDownloadActiveChange?: (active: boolean) => void;
   onLoadVideo?: RecordVideoLoader;
   commentsConnection?: ExploreConnection | null;
   downloadStates?: Record<string, RecordDownloadState>;
-  /** 送去拆片工坊的进度，和下载一样按记录 id 记 */
-  sendStates?: Record<string, RecordDownloadState>;
   onOpenSettings: () => void;
   onReplayStory: () => void;
   onSync: () => void;
@@ -158,8 +165,8 @@ export interface ContentWorkspaceProps {
   appStyle?: AppStyle;
   /** 极简风格打开报告时借用的那套故事页（决定「重看」按钮叫什么） */
   storyStyle?: StoryStyle;
-  /** 打开设置面板；不传就不显示侧栏的「设置」 */
-  onOpenPreferences?: () => void;
+  /** 打开设置面板（可指定页签）；不传账号菜单里就没有「设置」「切换账号」 */
+  onOpenPreferences?: (section?: SettingsSection) => void;
 }
 
 export type RecordDownloadState = "idle" | "queued" | "running" | "complete" | "failed";
@@ -190,22 +197,23 @@ const navItems: NavItem[] = [
 ];
 
 
-// 观看历史、直播、喜欢、收藏、推荐流挡掉的是同一种记录列表，我的评论也放在一起：侧栏只占「内容库」一项，进去用页签切换
+// 一级入口在侧栏，二级用页内页签：观看历史、直播、喜欢、收藏、推荐流挡掉的、我的评论并成「内容库」，持续报告和变化线索并成「报告」
 const LIBRARY_VIEWS: readonly WorkspaceViewKey[] = ["watch_history", "live", "liked_videos", "favorite_videos", "feed_filtered", "comments"];
 const isLibraryView = (view: WorkspaceViewKey) => LIBRARY_VIEWS.includes(view);
-type SideKey = WorkspaceViewKey | "library";
+type SideKey = WorkspaceViewKey | "library" | "report";
 const libraryItems = navItems.filter((item) => isLibraryView(item.id));
+const reportItems = navItems.filter((item) => isReportView(item.id));
 // 刷视频、探索、创作者中心和 AI 助手是工具页：不显示条数、隐私和重新读取
 const toolView = (view: SideKey) => view === "feed" || view === "explore" || view === "creator" || view === "assistant";
+// 「报告」这一项也不挂条数：条数在它的页签上
+const showsCount = (view: SideKey) => !toolView(view) && view !== "report";
 const sideItem = (id: SideKey) => navItems.find((item) => item.id === id)!;
-// 侧栏按功能分区：看视频 / 我的记录 / 报告 / 创作工具，区和区之间一道细线
-const sideItems: NavItem<SideKey>[] = [
-  sideItem("feed"), sideItem("explore"),
-  { id: "library", label: "内容库", icon: LibraryBig, accent: color.cyan }, sideItem("chat"),
-  sideItem("summary"), sideItem("highlights"),
-  sideItem("creator"), sideItem("assistant"),
+// 侧栏按「来这儿做什么」分三组：发现（看新的）/ 我的（自己留下的）/ 洞察（从记录里看出什么）
+const sideGroups: ReadonlyArray<{ label: string; items: NavItem<SideKey>[] }> = [
+  { label: "发现", items: [sideItem("feed"), sideItem("explore")] },
+  { label: "我的", items: [{ id: "library", label: "内容库", icon: LibraryBig, accent: color.cyan }, sideItem("chat")] },
+  { label: "洞察", items: [{ id: "report", label: "报告", icon: LayoutDashboard, accent: color.green }, sideItem("creator"), sideItem("assistant")] },
 ];
-const SECTION_STARTS: ReadonlySet<SideKey> = new Set(["library", "summary", "creator"]);
 
 const webPointer = Platform.OS === "web" ? ({ cursor: "pointer" } as object) : null;
 
@@ -228,6 +236,7 @@ function Text({ style, ...rest }: TextProps) {
 }
 
 export function ContentWorkspace({
+  sources,
   feed,
   explore,
   creator,
@@ -249,13 +258,11 @@ export function ContentWorkspace({
   onChangeView,
   onOpenRecord,
   onDownloadRecord,
-  onSendToReelLab,
   onBatchDownloadActiveChange,
   onLoadVideo,
   commentsConnection,
   foldersRevision,
   downloadStates = {},
-  sendStates = {},
   onOpenSettings,
   onReplayStory,
   onSync,
@@ -282,12 +289,15 @@ export function ContentWorkspace({
   // root 的桌面内边距与 stage 边框会占掉 36px，使用同一个主区宽度供各内容页计算。
   const mainWidth = Math.max(0, width - (mobile ? 0 : 36) - sidebarWidth);
   const currentNav = navItems.find((item) => item.id === activeView) ?? navItems[0]!;
-  const sideKey: SideKey = isLibraryView(activeView) ? "library" : activeView;
+  const sideKey: SideKey = isLibraryView(activeView) ? "library" : reportView ? "report" : activeView;
   // 刷视频和 AI 助手都能在设置里隐藏，没传就不进侧栏（feed 传 null 是年志盖着时先不挂播放器，侧栏照常有它）
-  const sides = sideItems.filter((item) => (item.id !== "assistant" || assistant) && (item.id !== "feed" || feed !== undefined));
-  // 点侧栏「内容库」回到上次看的那一栏
+  const groups = sideGroups.map((group) => ({ ...group, items: group.items.filter((item) => (item.id !== "assistant" || assistant) && (item.id !== "feed" || feed !== undefined)) }));
+  const sides = groups.flatMap((group) => group.items);
+  // 点侧栏「内容库」「报告」回到上次看的那一栏
   const lastLibraryView = useRef<WorkspaceViewKey>(isLibraryView(activeView) ? activeView : "watch_history");
   if (isLibraryView(activeView)) lastLibraryView.current = activeView;
+  const lastReportView = useRef<WorkspaceViewKey>(reportView ? activeView : "summary");
+  if (reportView) lastReportView.current = activeView;
   const [reportUpdateNotice, setReportUpdateNotice] = useState(false);
   // 侧栏当前项的指示条：一根，随选中项滑动（各按钮 onLayout 报自己的 y）
   const [navTops, setNavTops] = useState<Record<string, number>>({});
@@ -328,6 +338,7 @@ export function ContentWorkspace({
   const feedVideos = useFeedFilteredVideos(commentsConnection, activeView === "feed_filtered");
   const myComments = useMyComments(commentsConnection, status?.account?.id, status?.state, activeView === "comments");
   const counts: Record<SideKey, number> = {
+    sources: 0,
     feed: 0,
     explore: 0,
     creator: 0,
@@ -339,6 +350,7 @@ export function ContentWorkspace({
     feed_filtered: feedVideos.length,
     comments: myComments.length,
     library: 0,
+    report: 0,
     chat: countChatMessages(chatMessages, chatConversations),
     summary: model.unique || totalRecords,
     highlights: livingReport
@@ -363,9 +375,43 @@ export function ContentWorkspace({
   const [ringRef, ringDrawn] = useDraw<View>();
 
   const changeView = (next: SideKey) => {
-    const nextView = next === "library" ? lastLibraryView.current : next;
+    const nextView = next === "library" ? lastLibraryView.current : next === "report" ? lastReportView.current : next;
     if (isReportView(nextView) && !reportView) setReportAutoCollapsed(true);
     onChangeView(nextView);
+  };
+
+  // 侧栏最下面一行：当前账号 + 连接状态，点开是全局菜单（读取、连接与采集、切换账号、设置）
+  const account = status?.account ?? null;
+  const syncFailed = chatConnected && status?.state === "error";
+  const accountTitle = (!privacy && account?.nickname?.trim()) || (chatConnected ? "抖音账号" : "未连接");
+  // 桌面版采集器是自己连上的，「已连接」不等于登录了抖音：没登录或登录失效要在这一行说出来，和连接页的账号卡一致
+  const loginExpired = credentialsExpired(chatConnected, status);
+  const loginMissing = loginExpired || desktopLoginNeeded(isDesktopApp(), chatConnected, status);
+  const accountNote = !chatConnected ? "点这里连接采集器" : loginMissing ? (loginExpired ? "登录失效了" : "还没登录抖音") : busy ? "正在读取…" : syncFailed ? "读取出错了" : updatedAt ? `${formatShortDate(updatedAt)} 更新` : "已连接";
+  const accountDot = !chatConnected ? color.textMuted : syncFailed ? color.danger : loginMissing || busy ? color.amber : color.green;
+  const accountMenu = useContextMenu();
+  const accountRef = useRef<View>(null);
+  // 菜单开着时再点这一行：菜单在按下时已经自己关了，松手这一下不能又把它打开
+  const accountMenuClosedAt = useRef(0);
+  useEffect(() => {
+    if (!accountMenu.isOpen) accountMenuClosedAt.current = Date.now();
+  }, [accountMenu.isOpen]);
+  const openAccountMenu = () => {
+    const row = accountRef.current as unknown as HTMLElement | null;
+    if (!row?.getBoundingClientRect) { onOpenSettings(); return; }
+    if (Date.now() - accountMenuClosedAt.current < 400) return;
+    const rect = row.getBoundingClientRect();
+    const icon = (Icon: IconComponent) => <Icon color={color.textSecondary} size={14} strokeWidth={2} />;
+    // 贴着这一行的上沿往上长（下面放不下，菜单自己会翻上去）
+    accountMenu.open({ x: rect.left, y: rect.top - 6 }, [
+      { id: "sync", label: busy ? "正在读取记录…" : "增量读取记录", icon: icon(RefreshCw), disabled: busy && "正在读取，读完再点", onSelect: onSync },
+      { id: "sources", label: "连接与采集", icon: icon(Plug), onSelect: onOpenSettings },
+      ...(onOpenPreferences ? [
+        { id: "account-sep", separator: true as const },
+        { id: "accounts", label: "切换账号", icon: icon(UsersRound), onSelect: () => onOpenPreferences("account") },
+        { id: "preferences", label: "设置", icon: icon(Settings), onSelect: () => onOpenPreferences() },
+      ] : []),
+    ]);
   };
 
   const toggleSidebar = () => {
@@ -376,11 +422,12 @@ export function ContentWorkspace({
     setSidebarCollapsed((collapsed) => !collapsed);
   };
 
-  // 极简：内容库的页签直接放进顶栏，替掉和选中页签重复的标题，少一行横条
+  // 极简：内容库和报告的页签直接放进顶栏，替掉和选中页签重复的标题，少一行横条
   const tabsInTop = appStyle === "minimal" && !mobile;
-  const libraryTabs = isLibraryView(activeView) ? (
+  const hubItems = isLibraryView(activeView) ? libraryItems : reportView ? reportItems : null;
+  const libraryTabs = hubItems ? (
     <View {...ws("w-libtabs")} accessibilityRole="tablist" style={[styles.libraryTabs, mobile && styles.libraryTabsMobile]}>
-      {libraryItems.map((item) => {
+      {hubItems.map((item) => {
         const on = item.id === activeView;
         const Icon = item.icon;
         return (
@@ -393,7 +440,7 @@ export function ContentWorkspace({
             {...fx({ hover: "tint", ws: on ? "c-filter on" : "c-filter" })}
             onPress={() => changeView(item.id)}
             style={({ pressed }) => [styles.libraryTab, on && { backgroundColor: alpha(item.accent, 0.13) }, pressed && styles.buttonPressed, webPointer]}
-            testID={`library-tab-${item.id}`}
+            testID={`${reportView ? "report" : "library"}-tab-${item.id}`}
           >
             <Icon color={on ? item.accent : color.textMuted} size={15} strokeWidth={on ? 2.4 : 2} />
             <Text numberOfLines={1} style={[styles.libraryTabText, on && styles.libraryTabTextOn]}>{item.label}</Text>
@@ -415,73 +462,66 @@ export function ContentWorkspace({
             {Platform.OS === "web" && navTops[sideKey] !== undefined ? (
               <View {...ws("w-glider")} pointerEvents="none" style={[styles.navGlider, ease("top,background-color", 380), { top: navTops[sideKey]! + 14, backgroundColor: currentNav.accent }]} />
             ) : null}
-            {sides.map((item) => (
-              <React.Fragment key={item.id}>
-                {SECTION_STARTS.has(item.id) ? <View {...ws("w-navsep")} style={styles.navSection} /> : null}
-                <NavButton
-                  compact={compactSidebar}
-                  count={counts[item.id]}
-                  item={item}
-                  onLayoutTop={(y) => reportNavTop(item.id, y)}
-                  onPress={() => changeView(item.id)}
-                  selected={item.id === sideKey}
-                />
+            {/* 组名和导航项是扁平的兄弟节点：包一层分组 View 的话，各项 onLayout 报的 y 就变成相对分组的，指示条会错位 */}
+            {groups.map((group, index) => group.items.length ? (
+              <React.Fragment key={group.label}>
+                {/* 展开时是组名，收起时组名淡出、换成一道细线（第一组上面不用线）；高度不变，收放时导航项不跳 */}
+                <View {...ws("w-navgroup")} style={styles.navGroup}>
+                  <Text numberOfLines={1} style={[styles.navGroupLabel, collapseCopy, compactSidebar && styles.sidebarCopyHidden]}>{group.label}</Text>
+                  {index ? <View style={[styles.navGroupRule, collapseCopy, !compactSidebar && styles.sidebarCopyHidden]} /> : null}
+                </View>
+                {group.items.map((item) => (
+                  <NavButton
+                    key={item.id}
+                    compact={compactSidebar}
+                    count={counts[item.id]}
+                    item={item}
+                    onLayoutTop={(y) => reportNavTop(item.id, y)}
+                    onPress={() => changeView(item.id)}
+                    selected={item.id === sideKey}
+                  />
+                ))}
               </React.Fragment>
-            ))}
+            ) : null)}
           </View>
           <BadgeWall compact={compactSidebar} />
           <ActiveDays compact={compactSidebar} days={model.activeDays} drawn={ringDrawn} viewRef={ringRef} year={model.year} />
           </View>
           <View style={styles.sidebarFooter}>
-            {onOpenPreferences ? (
-              <Pressable
-                accessibilityLabel="打开设置"
-                accessibilityRole="button"
-                {...fx({ hover: "tint", ws: "w-nav w-replay w-prefs" })}
-                onPress={() => onOpenPreferences()}
-                style={({ pressed }) => [styles.navButton, pressed && styles.buttonPressed, webPointer]}
-                testID="workspace-preferences"
-              >
-                <View style={styles.navIconWrap}><Settings color={color.textSecondary} size={20} strokeWidth={2} /></View>
-                <View style={[styles.navMeta, collapseCopy, compactSidebar && styles.sidebarCopyHidden]}>
-                  <Text numberOfLines={1} style={styles.navLabel}>设置</Text>
-                </View>
-              </Pressable>
-            ) : null}
             <Pressable
-              accessibilityLabel={replayLabel}
+              accessibilityLabel={`${accountTitle}，${accountNote}，打开菜单`}
               accessibilityRole="button"
-              {...fx({ hover: "tint", ws: "w-nav w-replay" })}
-              disabled={!report || report.status === "empty"}
-              onPress={onReplayStory}
-              style={({ pressed }) => [
-                styles.navButton,
-                (!report || report.status === "empty") && styles.buttonDisabled,
-                pressed && styles.buttonPressed,
-                webPointer,
-              ]}
+              accessibilityState={{ expanded: accountMenu.isOpen }}
+              aria-haspopup="menu"
+              // 连接与采集这一页归在账号行下面：在那一页时这一行是选中的
+              {...fx({ hover: "tint", ws: activeView === "sources" ? "w-nav w-replay w-account on" : "w-nav w-replay w-account" })}
+              onPress={openAccountMenu}
+              ref={accountRef}
+              style={({ pressed }) => [styles.navButton, activeView === "sources" && styles.navButtonSelected, pressed && styles.buttonPressed, webPointer]}
+              testID="workspace-account"
             >
-              <View style={styles.navIconWrap}><Sparkles color={color.accent} size={20} strokeWidth={2} /></View>
+              <View style={styles.navIconWrap}>
+                {account?.avatar && !privacy
+                  ? <Image source={{ uri: account.avatar }} style={styles.accountAvatar} />
+                  : <View style={[styles.accountAvatar, styles.accountAvatarEmpty]}><UserRound color={color.textSecondary} size={16} strokeWidth={2} /></View>}
+                <View style={[styles.accountDot, { backgroundColor: accountDot }]} />
+              </View>
               <View style={[styles.navMeta, collapseCopy, compactSidebar && styles.sidebarCopyHidden]}>
-                <Text numberOfLines={1} style={styles.navLabel}>{replayLabel}</Text>
+                <View style={styles.accountCopy}>
+                  <Text numberOfLines={1} style={[styles.navLabel, styles.accountName]}>{accountTitle}</Text>
+                  <Text {...ws("w-accountnote")} numberOfLines={1} style={styles.accountNote}>{accountNote}</Text>
+                </View>
+                <ChevronsUpDown color={color.textMuted} size={14} strokeWidth={2} />
               </View>
             </Pressable>
-            <Pressable
-              {...fx({ hover: "raise", ws: "btn w-settings" })}
-              accessibilityLabel="打开连接与采集设置"
-              accessibilityRole="button"
-              onPress={onOpenSettings}
-              style={({ pressed }) => [styles.settingsButton, pressed && styles.buttonPressed, webPointer]}
-            >
-              <View style={styles.settingsIcon}><Plug color={color.textSecondary} size={19} strokeWidth={2} /></View>
-              <Text numberOfLines={1} style={[styles.settingsButtonText, collapseCopy, compactSidebar && styles.sidebarCopyHidden]}>连接与采集</Text>
-            </Pressable>
+            {accountMenu.element}
           </View>
         </View>
       ) : null}
 
       <View style={[styles.main, mobile && styles.mainMobile]}>
-        <View {...ws("w-top")} testID="workspace-topbar" style={[styles.topbar, mobile && styles.topbarMobile]}>
+        {/* 连接与采集自带顶栏（状态、账号、打开报告），外壳这条让位 */}
+        {activeView === "sources" ? null : <View {...ws("w-top")} testID="workspace-topbar" style={[styles.topbar, mobile && styles.topbarMobile]}>
           <View style={styles.topbarHeading}>
             {tabsInTop && libraryTabs ? libraryTabs : <>
             {/* 极简不要装饰性的英文眉题 */}
@@ -503,6 +543,20 @@ export function ContentWorkspace({
                 style={({ pressed }) => [styles.toolbarButton, pressed && styles.buttonPressed, webPointer]}
               >
                 <Sparkles color={color.accent} size={19} />
+              </Pressable>
+            ) : reportView ? (
+              // 年度那份报告的入口跟着「报告」走，不再占侧栏底部一行
+              <Pressable
+                accessibilityLabel={replayLabel}
+                accessibilityRole="button"
+                disabled={!report || report.status === "empty"}
+                {...fx({ hover: "raise", ws: "btn w-replaybtn" })}
+                onPress={onReplayStory}
+                style={({ pressed }) => [styles.replayButton, (!report || report.status === "empty") && styles.buttonDisabled, pressed && styles.buttonPressed, webPointer]}
+                testID="workspace-replay"
+              >
+                <Sparkles color={color.accent} size={16} strokeWidth={2} />
+                <Text numberOfLines={1} style={styles.replayButtonText}>{replayLabel}</Text>
               </Pressable>
             ) : null}
             {!toolView(activeView) ? <Pressable
@@ -537,7 +591,7 @@ export function ContentWorkspace({
               </Pressable>
             ) : null}
           </View>
-        </View>
+        </View>}
 
         {tabsInTop ? null : libraryTabs}
 
@@ -554,7 +608,7 @@ export function ContentWorkspace({
           </Pressable>
         ) : null}
 
-        {activeView === "feed" ? feed : activeView === "explore" ? explore : activeView === "creator" ? creator : activeView === "assistant" ? assistant : activeView === "chat" ? (
+        {activeView === "sources" ? sources : activeView === "feed" ? feed : activeView === "explore" ? explore : activeView === "creator" ? creator : activeView === "assistant" ? assistant : activeView === "chat" ? (
           <ChatWorkspace
             busy={chatBusy}
             connected={chatConnected}
@@ -595,13 +649,12 @@ export function ContentWorkspace({
             onRetryFolders={folders.retry}
             label={currentNav.label}
             downloadStates={downloadStates}
-            sendStates={sendStates}
             mobile={mobile}
             onDownloadRecord={onDownloadRecord}
-            onSendToReelLab={onSendToReelLab}
             onBatchDownloadActiveChange={onBatchDownloadActiveChange}
             onLoadVideo={onLoadVideo}
             commentsConnection={commentsConnection}
+            accountId={status?.account?.id ?? null}
             onOpenRecord={onOpenRecord}
             onOpenSettings={onOpenSettings}
             privacy={privacy}
@@ -632,7 +685,7 @@ export function ContentWorkspace({
 
       {mobile ? (
         <View {...ws("w-bottom g-ink")} accessibilityRole="tablist" style={styles.bottomNav}>
-          {Platform.OS === "web" ? (
+          {Platform.OS === "web" && sides.some((item) => item.id === sideKey) ? (
             <View pointerEvents="none" style={[styles.bottomNavGlider, ease("left,background-color", 350), { left: `${(sides.findIndex((item) => item.id === sideKey) + 0.5) / sides.length * 100}%`, backgroundColor: currentNav.accent }]} />
           ) : null}
           {sides.map((item) => {
@@ -641,7 +694,7 @@ export function ContentWorkspace({
             return (
               <Pressable
                 key={item.id}
-                accessibilityLabel={toolView(item.id) ? item.label : `${item.label}，${counts[item.id]} 条`}
+                accessibilityLabel={showsCount(item.id) ? `${item.label}，${counts[item.id]} 条` : item.label}
                 accessibilityRole="tab"
                 accessibilityState={{ selected }}
                 onPress={() => changeView(item.id)}
@@ -719,7 +772,7 @@ function NavButton({
     <Pressable
       {...fx({ hover: "tint", ws: selected ? "w-nav on" : "w-nav" })}
       testID={`workspace-nav-${item.id}`}
-      accessibilityLabel={toolView(item.id) ? item.label : `${item.label}，${count} 条`}
+      accessibilityLabel={showsCount(item.id) ? `${item.label}，${count} 条` : item.label}
       accessibilityRole="tab"
       accessibilityState={{ selected }}
       onLayout={onLayoutTop ? (event) => onLayoutTop(event.nativeEvent.layout.y) : undefined}
@@ -736,7 +789,7 @@ function NavButton({
       </View>
       <View style={[styles.navMeta, collapseCopy, compact && styles.sidebarCopyHidden]}>
         <Text {...ws("w-navlabel")} numberOfLines={1} style={[styles.navLabel, selected && styles.navLabelSelected]}>{item.label}</Text>
-        {!toolView(item.id) ? <Text {...ws("mono w-navcount")} style={[styles.navCount, selected && { color: item.accent }]}>{formatCompactNumber(count)}</Text> : null}
+        {showsCount(item.id) ? <Text {...ws("mono w-navcount")} style={[styles.navCount, selected && { color: item.accent }]}>{formatCompactNumber(count)}</Text> : null}
       </View>
       {selected && Platform.OS !== "web" ? <View style={[styles.navIndicator, { backgroundColor: item.accent }]} /> : null}
     </Pressable>
@@ -900,10 +953,12 @@ function FolderBar({
   counts,
   total,
   active,
+  lead,
   privacy,
   error,
   nameOf,
   onSelect,
+  onMore,
   onCreate,
   onRename,
   onDelete,
@@ -913,24 +968,35 @@ function FolderBar({
   counts: Map<string, number>;
   total: number;
   active: string;
+  /** 从「所有文件夹」里挑的那个排到最前面，免得落在藏起来的第二行 */
+  lead: string | null;
   privacy: boolean;
   error: string | null | undefined;
   nameOf: (folder: RecordFolder) => string;
   onSelect: (filter: string) => void;
+  onMore: (at: MenuPoint) => void;
   onCreate: () => void;
   onRename: (folder: RecordFolder) => void;
   onDelete: (folder: RecordFolder) => void;
   onChipMenu: (folder: RecordFolder, at: MenuPoint) => void;
 }) {
   const current = list.folders.find((folder) => folder.id === active) ?? null;
+  const first = list.folders.find((folder) => folder.id === lead);
+  const ordered = first ? [first, ...list.folders.filter((folder) => folder !== first)] : list.folders;
+  // 芯片只占一行，排不下的折到第二行、被裁掉，从「所有文件夹」里挑。里层不限高，量它高过一行就是有折下去的
+  const [overflow, setOverflow] = useState(false);
+  // 文件夹多了「新建」收进「所有文件夹」菜单里，给芯片腾地方。按个数定、不按量出来的折没折行：
+  // 按折行定的话收起「新建」腾出地方→不折行了→「新建」又出来→又折行，来回闪
+  const many = list.folders.length >= 10;
   return (
     <View style={styles.folderBar} testID="record-folders">
       <View {...ws("c-filters")} style={styles.folderRow}>
         {/* 只有芯片算页签，「新建」「重命名」「删除」是按钮，放在页签组外面 */}
-        <View accessibilityRole="tablist" style={styles.folderTabs}>
+        <View style={styles.folderTabsClip}>
+        <View accessibilityRole="tablist" onLayout={(event) => setOverflow(event.nativeEvent.layout.height > 40)} style={styles.folderTabs}>
           <FolderChip count={total} label="全部" on={active === ALL_FOLDERS} onPress={() => onSelect(ALL_FOLDERS)} />
           {list.folders.length ? <FolderChip count={counts.get(UNFILED) ?? 0} label="未分区" on={active === UNFILED} onPress={() => onSelect(UNFILED)} /> : null}
-          {list.folders.map((folder) => (
+          {ordered.map((folder) => (
             <FolderChip
               count={counts.get(folder.id) ?? 0}
               key={folder.id}
@@ -941,7 +1007,21 @@ function FolderBar({
             />
           ))}
         </View>
-        {!privacy ? (
+        </View>
+        {overflow || many ? (
+          <Pressable
+            {...ws("btn small")}
+            accessibilityLabel={`所有文件夹，共 ${list.folders.length} 个`}
+            accessibilityRole="button"
+            onPress={(event) => onMore(pointBelow(event))}
+            style={({ pressed }) => [styles.folderAction, pressed && styles.buttonPressed, webPointer]}
+          >
+            <Text style={styles.folderActionText}>所有文件夹</Text>
+            <Text {...ws("mono")} style={styles.folderChipCount}>{list.folders.length}</Text>
+            <ChevronDown color={color.textSecondary} size={13} />
+          </Pressable>
+        ) : null}
+        {!privacy && !many ? (
           <Pressable
             {...ws("btn small")}
             accessibilityLabel="新建文件夹"
@@ -977,6 +1057,7 @@ function FolderBar({
 function FolderDialog({
   state,
   list,
+  douyin,
   onCancel,
   onCreate,
   onRename,
@@ -984,6 +1065,8 @@ function FolderDialog({
 }: {
   state: FolderDialogState;
   list: RecordFolderList;
+  /** 收藏栏：文件夹同步成抖音收藏夹 */
+  douyin: boolean;
   onCancel: () => void;
   onCreate: (name: string, move?: PersonalVideoRecord[]) => void;
   onRename: (folder: RecordFolder, name: string) => void;
@@ -991,7 +1074,8 @@ function FolderDialog({
 }) {
   const [name, setName] = useState(state.mode === "rename" ? state.folder.name : "");
   const [tried, setTried] = useState(false);
-  const problem = state.mode === "delete" ? null : folderNameProblem(list, name, state.mode === "rename" ? state.folder.id : undefined);
+  const problem = state.mode === "delete" ? null
+    : folderNameProblem(list, name, state.mode === "rename" ? state.folder.id : undefined, douyin ? DOUYIN_FOLDER_NAME_MAX : undefined);
   // 空着的时候先不催，点了「新建」或者打了字再说哪里不行
   const shownProblem = problem && (tried || name.trim()) ? problem : null;
   const submit = () => {
@@ -1013,7 +1097,10 @@ function FolderDialog({
         <View {...ws("w-dialog")} accessibilityViewIsModal style={styles.dialog} testID="folder-dialog">
           <Text accessibilityRole="header" style={styles.dialogTitle}>{title}</Text>
           {state.mode === "delete" ? (
-            <Text style={styles.dialogText}>{state.count ? `里面的 ${state.count} 条会回到未分区，视频记录本身不会删掉。` : "这个文件夹还是空的，删掉不影响任何记录。"}</Text>
+            <Text style={styles.dialogText}>
+              {state.folder.douyinId ? "抖音上的这个收藏夹也会一起删掉。" : ""}
+              {state.count ? `里面的 ${state.count} 条会回到未分区，${state.folder.douyinId ? "仍在收藏里。" : "视频记录本身不会删掉。"}` : "这个文件夹还是空的，删掉不影响任何记录。"}
+            </Text>
           ) : (
             <TextInput
               {...ws("c-input")}
@@ -1028,6 +1115,7 @@ function FolderDialog({
               value={name}
             />
           )}
+          {douyin && state.mode === "create" ? <Text style={styles.dialogText}>打开了「允许在抖音上操作」时，会在抖音上建一个同名的私密收藏夹，之后在这里放进、移出也会同步过去。</Text> : null}
           {shownProblem ? <Text accessibilityRole="alert" style={styles.dialogError}>{shownProblem}</Text> : null}
           <View style={styles.dialogActions}>
             <Pressable {...ws("btn")} accessibilityRole="button" onPress={onCancel} style={({ pressed }) => [styles.batchButton, pressed && styles.buttonPressed, webPointer]}>
@@ -1055,13 +1143,12 @@ function RecordsGallery({
   onRetryFolders,
   label,
   downloadStates,
-  sendStates,
   mobile,
   onDownloadRecord,
-  onSendToReelLab,
   onBatchDownloadActiveChange,
   onLoadVideo,
   commentsConnection,
+  accountId,
   onOpenRecord,
   onOpenSettings,
   privacy,
@@ -1086,14 +1173,13 @@ function RecordsGallery({
   onRetryFolders?: () => void;
   label: string;
   downloadStates: Record<string, RecordDownloadState>;
-  sendStates: Record<string, RecordDownloadState>;
   mobile: boolean;
   /** keepExplore：从播放器里下载时别关探索会话，评论面板还在用 */
   onDownloadRecord?: (record: PersonalVideoRecord, keepExplore?: boolean) => Promise<void>;
-  onSendToReelLab?: (record: PersonalVideoRecord) => void;
   onBatchDownloadActiveChange?: (active: boolean) => void;
   onLoadVideo?: RecordVideoLoader;
   commentsConnection?: ExploreConnection | null;
+  accountId?: string | null;
   onOpenRecord: (url: string) => Promise<void>;
   onOpenSettings: () => void;
   privacy: boolean;
@@ -1121,7 +1207,9 @@ function RecordsGallery({
   }
   const enterFrom = batch.current.from;
   const enterOrder = useMemo(() => new Map((incoming ?? NO_RECORDS).slice(enterFrom, ready).map((record, index) => [record.id, index + 1])), [incoming, enterFrom, ready]);
-  const [playingRecord, setPlayingRecord] = useState<PersonalVideoRecord | null>(null);
+  const [playingRecord, setPlayingRecord] = useState<{ record: PersonalVideoRecord; startMs?: number } | null>(null);
+  const [analysisRecord, setAnalysisRecord] = useState<PersonalVideoRecord | null>(null);
+  const analysisId = analysisRecord && analysisVideoIdOf(analysisRecord);
   const [liveTarget, setLiveTarget] = useState<LiveTarget | null>(null);
   const openLive = Platform.OS === "web" && !privacy
     ? (record: PersonalVideoRecord) => record.url && setLiveTarget({ room: record.url, title: record.title, anchor: record.author, cover: record.coverUrl })
@@ -1132,6 +1220,7 @@ function RecordsGallery({
   const [batchRecords, setBatchRecords] = useState<PersonalVideoRecord[] | null>(null);
   const [query, setQuery] = useState("");
   const [activeFolder, setActiveFolder] = useState(ALL_FOLDERS);
+  const [leadFolder, setLeadFolder] = useState<string | null>(null);
   // 在文件夹（或未分区）里移走的视频，换筛选之前先留在原处
   const [keptKeys, setKeptKeys] = useState<ReadonlySet<string>>(new Set());
   const [folderDialog, setFolderDialog] = useState<FolderDialogState | null>(null);
@@ -1140,12 +1229,25 @@ function RecordsGallery({
     onBatchDownloadActiveChange?.(batchRecords !== null);
     return () => onBatchDownloadActiveChange?.(false);
   }, [batchRecords, onBatchDownloadActiveChange]);
+  // 批量解析：勾选的视频交给采集器排队。弹窗只是看进度的，关掉也接着跑，所以进这页时问一次有没有在跑的，好给出「解析进度」
+  const [analysisBatch, setAnalysisBatch] = useState<{ videoId: string; title: string }[] | null>(null);
+  const [analysisBatchRunning, setAnalysisBatchRunning] = useState(false);
+  const batchBaseUrl = commentsConnection?.baseUrl;
+  const batchToken = commentsConnection?.token;
+  useEffect(() => {
+    setAnalysisBatch(null); setAnalysisBatchRunning(false);
+    if (Platform.OS !== "web" || !batchBaseUrl || !batchToken) return;
+    const controller = new AbortController();
+    videoAnalysisBatch({ baseUrl: batchBaseUrl, token: batchToken }, null, controller.signal, accountId)
+      .then((batch) => { if (!controller.signal.aborted) setAnalysisBatchRunning(batch?.status === "running"); }, () => undefined);
+    return () => controller.abort();
+  }, [batchBaseUrl, batchToken, accountId]);
   useEffect(() => { setSelectMode(null); setSelected(new Set()); setFolderDialog(null); }, [label, privacy]);
   useEffect(() => { setActiveFolder(ALL_FOLDERS); }, [label]);
   // 换了搜索词、换了文件夹就重新选，免得之前选的、现在看不见的那些悄悄留在下载列表里
   useEffect(() => { setSelected(new Set()); }, [query, activeFolder]);
   useEffect(() => { setKeptKeys(new Set()); }, [label, activeFolder]);
-  useEffect(() => { setPlayingRecord(null); setLiveTarget(null); setQuery(""); }, [label, privacy]);
+  useEffect(() => { setPlayingRecord(null); setAnalysisRecord(null); setLiveTarget(null); setQuery(""); }, [label, privacy, accountId]);
   const list = Platform.OS === "web" && folders && onChangeFolders ? folders : null;
   // 文件夹读不到了（换账号、采集器出错），整理模式就没法用了，退出来，免得剩个没有出口的工具条
   useEffect(() => { if (!list && selectMode === "folder") setSelectMode(null); }, [list, selectMode]);
@@ -1197,7 +1299,26 @@ function RecordsGallery({
       disabled: list.folders.length >= FOLDERS_MAX ? `最多建 ${FOLDERS_MAX} 个文件夹` : null,
       onSelect: () => setFolderDialog({ mode: "create", move: targets }),
     });
-    menu.open(at, entries);
+    menu.open(at, entries, list.folders.length > 12 ? { search: "搜文件夹" } : undefined);
+  };
+  const openAllFolders = (at: MenuPoint) => {
+    if (!list) return;
+    menu.open(at, list.folders.map((folder) => ({
+      id: folder.id,
+      label: nameOf(folder),
+      hint: (folderCounts?.get(folder.id) ?? 0).toLocaleString("zh-CN"),
+      icon: folder.id === folderFilter ? <Check color={color.cyan} size={14} /> : <Folder color={color.textSecondary} size={14} />,
+      onSelect: () => { setLeadFolder(folder.id); setActiveFolder(folder.id); },
+    } as MenuEntry)).concat(privacy ? [] : [
+      { id: "separator", separator: true },
+      {
+        id: "create",
+        label: "新建文件夹…",
+        icon: <FolderPlus color={color.textSecondary} size={14} />,
+        disabled: list.folders.length >= FOLDERS_MAX ? `最多建 ${FOLDERS_MAX} 个文件夹` : null,
+        onSelect: () => setFolderDialog({ mode: "create" }),
+      },
+    ]), { search: "搜文件夹" });
   };
   const openChipMenu = (folder: RecordFolder, at: MenuPoint) => menu.open(at, [
     { id: "rename", label: "重命名", icon: <Pencil color={color.textSecondary} size={14} />, onSelect: () => setFolderDialog({ mode: "rename", folder }) },
@@ -1240,11 +1361,14 @@ function RecordsGallery({
     : undefined, [rowFrame]);
   // 卡片是 memo 的：读取、接收聊天时状态每变一次整页都要重渲染，几百张卡片跟着重画一遍要一两百毫秒。
   // 外面传进来的回调每次都是新函数，这里换成引用不变、调用时取最新那份的版本
-  const latest = useRef({ onDownloadRecord, onSendToReelLab, onOpenRecord, openLive, openFolderMenu });
-  latest.current = { onDownloadRecord, onSendToReelLab, onOpenRecord, openLive, openFolderMenu };
+  const latest = useRef({ onDownloadRecord, onOpenRecord, openLive, openFolderMenu, commentsConnection, onOpenSettings });
+  latest.current = { onDownloadRecord, onOpenRecord, openLive, openFolderMenu, commentsConnection, onOpenSettings };
   const handlers = useMemo(() => ({
     download: (record: PersonalVideoRecord) => latest.current.onDownloadRecord!(record),
-    send: (record: PersonalVideoRecord) => latest.current.onSendToReelLab!(record),
+    analyze: (record: PersonalVideoRecord) => {
+      if (latest.current.commentsConnection) setAnalysisRecord(record);
+      else latest.current.onOpenSettings();
+    },
     open: (url: string) => latest.current.onOpenRecord(url),
     live: (record: PersonalVideoRecord) => { latest.current.openLive?.(record); },
     folder: (record: PersonalVideoRecord, at: MenuPoint) => latest.current.openFolderMenu([record], at),
@@ -1263,7 +1387,7 @@ function RecordsGallery({
   }, [query, searchHit]);
   const playRecord = useCallback((record: PersonalVideoRecord) => {
     if (searching) unlockAchievement("found-it");
-    setPlayingRecord(record);
+    setPlayingRecord({ record });
   }, [searching]);
   // 喜欢和收藏的时间是上次播放的时间，不是点赞收藏的时间，拿来说「最早一条」会误导
   const earliest = useMemo(() => activeType === "watch_history" ? earliestRecordDate(records) : null, [activeType, records]);
@@ -1273,6 +1397,10 @@ function RecordsGallery({
   // 一万多条逐条解析网址要好几毫秒，没勾的时候（绝大多数时候）别算；换风格、收消息时这页会整页重渲染
   const chosen = useMemo(() => selected.size ? candidates.filter((record) => selected.has(videoDownloadKey(record)!)) : [], [candidates, selected]);
   const chosenRecords = selectMode === "folder" ? shownRecords.filter((record) => selected.has(record.id)) : [];
+  const analyzable = chosen.flatMap((record) => {
+    const videoId = analysisVideoIdOf(record);
+    return videoId ? [{ videoId, title: record.title ?? "" }] : [];
+  });
   // 整理不限条数，常开着连勾几十条：同一条、勾选状态没变就给同一个对象，卡片的 memo 才拦得住，勾一下只重画那一张
   const folderSelections = useRef(new Map<string, RecordSelection>());
   useEffect(() => { folderSelections.current.clear(); }, [selectMode]);
@@ -1320,6 +1448,8 @@ function RecordsGallery({
   const folderBar = list && folderCounts && records.length > 0 ? (
     <FolderBar
       active={folderFilter}
+      lead={leadFolder}
+      onMore={openAllFolders}
       counts={folderCounts}
       error={folderError}
       list={list}
@@ -1357,13 +1487,18 @@ function RecordsGallery({
       <BatchDownloadRangePicker key={`${folderFilter}:${query}`} candidates={candidates} onSelect={setSelected} />
       <View style={styles.batchActions}>
         <Pressable {...ws("btn")} accessibilityRole="button" onPress={() => setSelected(new Set())} style={styles.batchButton}><Text style={styles.batchButtonText}>清空选择</Text></Pressable>
+        <Pressable {...ws("btn")} accessibilityRole="button" accessibilityState={{ disabled: analyzable.length === 0 }} disabled={analyzable.length === 0}
+          onPress={() => { if (!commentsConnection) { onOpenSettings(); return; } setPlayingRecord(null); setAnalysisBatch(analyzable); }}
+          style={[styles.batchButton, analyzable.length === 0 && styles.buttonDisabled]}>
+          <Sparkles size={14} color={color.textSecondary} /><Text style={styles.batchButtonText}>解析所选（{analyzable.length}）</Text>
+        </Pressable>
         <Pressable {...ws("btn-solid")} accessibilityRole="button" accessibilityState={{ disabled: chosen.length === 0 }} disabled={chosen.length === 0}
           onPress={() => { if (!commentsConnection) { onOpenSettings(); return; } setPlayingRecord(null); setBatchRecords(chosen); }}
           style={[styles.batchButton, styles.batchPrimary, chosen.length === 0 && styles.buttonDisabled]}>
           <Download size={14} color={color.buttonText} /><Text style={styles.batchPrimaryText}>下载所选（{chosen.length}）</Text>
         </Pressable>
       </View>
-      <Text style={styles.batchHint}>重复作品只选一次，图文、直播和无有效链接的记录会跳过。每个 ZIP 最多 50 个视频、合计 500 MB。</Text>
+      <Text style={styles.batchHint}>重复作品只选一次，图文、直播和无有效链接的记录会跳过。每个 ZIP 最多 50 个视频、合计 500 MB；解析一次最多 100 条，排队一条一条做。</Text>
     </View> : null}
     <FlatList
       testID="record-grid"
@@ -1398,6 +1533,11 @@ function RecordsGallery({
           {Platform.OS === "web" && !privacy && (selectMode === "download" || hasDownloadable) ? <Pressable {...ws("btn")} accessibilityRole="button"
             onPress={() => { setSelectMode(selectMode === "download" ? null : "download"); setSelected(new Set()); }} style={styles.batchButton}>
             <Download size={15} color={color.textSecondary} /><Text style={styles.batchButtonText}>{selectMode === "download" ? "退出多选" : "批量下载"}</Text>
+          </Pressable> : null}
+          {/* 和批量下载用同一套勾选；有一批在跑时这个钮改成看进度 */}
+          {Platform.OS === "web" && !privacy && !selectMode && (analysisBatchRunning || hasDownloadable) ? <Pressable {...ws("btn")} accessibilityRole="button"
+            onPress={() => { if (analysisBatchRunning) setAnalysisBatch([]); else { setSelectMode("download"); setSelected(new Set()); } }} style={styles.batchButton}>
+            <Sparkles size={15} color={color.textSecondary} /><Text style={styles.batchButtonText}>{analysisBatchRunning ? "解析进度" : "批量解析"}</Text>
           </Pressable> : null}
           <View {...ws("w-switch")} accessibilityRole="tablist" style={styles.layoutSwitch}>
             <Pressable
@@ -1516,16 +1656,16 @@ function RecordsGallery({
           : keptKeys.has(folderKey(item)) && (list.items[folderKey(item)] ?? UNFILED) !== folderFilter ? filedIn ?? "未分区"
           : undefined;
         const onFolderMenu = list && !privacy ? handlers.folder : undefined;
+        const onAnalyze = Platform.OS === "web" && !privacy && analysisVideoIdOf(item) ? handlers.analyze : undefined;
         return layout === "grid"
           ? <RecordTile
               cellStyle={cellStyle}
               selection={selectionFor(item)}
               downloadState={downloadStates[item.id] ?? "idle"}
-              sendState={sendStates[item.id] ?? "idle"}
               filedIn={filedIn}
               folderName={folderName}
               onDownloadRecord={item.mediaType === "live" || !onDownloadRecord ? undefined : handlers.download}
-              onSendToReelLab={item.mediaType === "live" || !onSendToReelLab ? undefined : handlers.send}
+              onAnalyze={onAnalyze}
               onFolderMenu={onFolderMenu}
               onPlayRecord={item.mediaType === "live" ? openLive && handlers.live : onLoadVideo ? playRecord : undefined}
               onOpenRecord={handlers.open}
@@ -1536,18 +1676,27 @@ function RecordsGallery({
               type={activeType}
               enter={enterOrder.get(item.id)}
             />
-          : <RecordRow enter={enterOrder.get(item.id)} folderName={folderName} onFolderMenu={onFolderMenu} selection={selectionFor(item)} onOpenRecord={handlers.open} privacy={privacy} record={item} type={activeType} coverConnection={commentsConnection} coverOwner={coverOwner} />;
+          : <RecordRow enter={enterOrder.get(item.id)} folderName={folderName} onFolderMenu={onFolderMenu} onAnalyze={onAnalyze} selection={selectionFor(item)} onOpenRecord={handlers.open} privacy={privacy} record={item} type={activeType} coverConnection={commentsConnection} coverOwner={coverOwner} />;
       }}
       // 上万条记录靠滚轮翻太慢，留一条常驻、能拖的滚动条（样式见 motionCss 的 data-scrollbar）
       {...{ dataSet: { scrollbar: "" } }}
     />
+    {analysisId && analysisRecord && commentsConnection && !playingRecord && !privacy ? (
+      <VideoAnalysisDialog key={`${accountId}-${analysisId}`} accountId={accountId} connection={commentsConnection} videoId={analysisId}
+        title={analysisRecord.title} onClose={() => setAnalysisRecord(null)}
+        onSeek={onLoadVideo ? startMs => setPlayingRecord({ record: analysisRecord, startMs }) : undefined} />
+    ) : null}
     {Platform.OS === "web" && playingRecord && !privacy && onLoadVideo ? (
-      <RecordVideoPlayer record={playingRecord} records={shownRecords} onLoadVideo={onLoadVideo} commentsConnection={commentsConnection} onOpenRecord={onOpenRecord} onClose={() => setPlayingRecord(null)}
+      <RecordVideoPlayer record={playingRecord.record} initialTimeMs={playingRecord.startMs} records={shownRecords} onLoadVideo={onLoadVideo} commentsConnection={commentsConnection} accountId={accountId} onOpenRecord={onOpenRecord} onClose={() => setPlayingRecord(null)}
         onDownload={onDownloadRecord ? (record) => void onDownloadRecord(record, true) : undefined} downloadStates={downloadStates} />
     ) : null}
     {liveTarget && Platform.OS === "web" && !privacy ? (
       <LiveRoomPlayer target={liveTarget} connection={commentsConnection ?? null} onClose={() => setLiveTarget(null)} onOpenRecord={onOpenRecord} onOpenSettings={onOpenSettings} />
     ) : null}
+    {analysisBatch && commentsConnection && !privacy ? <VideoAnalysisBatchDialog accountId={accountId} connection={commentsConnection} items={analysisBatch}
+      onClose={() => setAnalysisBatch(null)} onRunning={setAnalysisBatchRunning}
+      // 排上队了就退出多选：勾选已经用完，「解析进度」的入口也要等退出多选才露出来
+      onStarted={() => { setSelectMode(null); setSelected(new Set()); }} /> : null}
     {batchRecords && commentsConnection ? <BatchVideoDownloadDialog records={batchRecords} connection={commentsConnection} privacy={privacy} onClose={(saved) => {
       setBatchRecords(null);
       if (saved.length) setSelected((current) => {
@@ -1558,6 +1707,7 @@ function RecordsGallery({
     }} /> : null}
     {folderDialog && list ? (
       <FolderDialog
+        douyin={activeType === "favorite_videos" && !live}
         list={list}
         onCancel={() => setFolderDialog(null)}
         onCreate={createFolder}
@@ -1654,11 +1804,10 @@ const RecordTile = memo(function RecordTile({
   cellStyle,
   selection,
   downloadState,
-  sendState,
   filedIn,
   folderName,
   onDownloadRecord,
-  onSendToReelLab,
+  onAnalyze,
   onFolderMenu,
   onPlayRecord,
   record,
@@ -1672,13 +1821,12 @@ const RecordTile = memo(function RecordTile({
   cellStyle?: object | null;
   selection?: RecordSelection;
   downloadState: RecordDownloadState;
-  sendState: RecordDownloadState;
   /** 实际放在哪个文件夹，给文件夹按钮的读屏说明用 */
   filedIn?: string;
   /** 封面左上角标出的文件夹名 */
   folderName?: string;
   onDownloadRecord?: (record: PersonalVideoRecord) => Promise<void>;
-  onSendToReelLab?: (record: PersonalVideoRecord) => void;
+  onAnalyze?: (record: PersonalVideoRecord) => void;
   /** 打开「放进文件夹」菜单：悬停时右上角的按钮、右键都走这里 */
   onFolderMenu?: (record: PersonalVideoRecord, at: MenuPoint) => void;
   onPlayRecord?: (record: PersonalVideoRecord) => void;
@@ -1706,9 +1854,7 @@ const RecordTile = memo(function RecordTile({
     : downloadState === "complete"
       ? "已下载"
       : downloadState === "failed" ? "重试" : "下载";
-  const sending = sendState === "queued" || sendState === "running";
   // 卡片上三颗按钮挤一行，字写短（和「跳转」「下载」一样两个字）；读屏说明写全
-  const sendLabel = sending ? "送去中" : sendState === "complete" ? "已送达" : sendState === "failed" ? "重送" : "送去";
   const markFocused = () => setFocused(true);
   const checkFocusBoundary = (event?: unknown) => {
     if (Platform.OS !== "web") {
@@ -1863,20 +2009,18 @@ const RecordTile = memo(function RecordTile({
               {downloading ? <ActivityIndicator color={color.white} size="small" /> : <Download color={color.white} size={14} strokeWidth={2.2} />}
               <Text style={styles.tileActionText}>{downloadLabel}</Text>
             </Pressable>
-            {onSendToReelLab && record.mediaType !== "image" ? <Pressable
+            {onAnalyze ? <Pressable
               testID="record-tile-action"
-              accessibilityLabel={sending ? "正在送去拆片工坊" : sendState === "complete" ? "已送到拆片工坊，再送一次" : sendState === "failed" ? "没送到拆片工坊，重送" : "送去拆片工坊"}
+              accessibilityLabel="解析视频"
               accessibilityRole="button"
-              accessibilityState={{ disabled: sending }}
-              disabled={sending}
               onFocus={markFocused}
               onBlur={checkFocusBoundary}
-              onPress={() => onSendToReelLab(record)}
+              onPress={() => onAnalyze(record)}
               {...ws("btn-sig w-tileaction")}
-              style={({ pressed }) => [styles.tileAction, sending && styles.tileActionDisabled, pressed && styles.tileActionPressed, webPointer]}
+              style={({ pressed }) => [styles.tileAction, pressed && styles.tileActionPressed, webPointer]}
             >
-              {sending ? <ActivityIndicator color={color.white} size="small" /> : <Send color={color.white} size={14} strokeWidth={2.2} />}
-              <Text style={styles.tileActionText}>{sendLabel}</Text>
+              <Sparkles color={color.white} size={14} strokeWidth={2.2} />
+              <Text style={styles.tileActionText}>解析</Text>
             </Pressable> : null}
           </View>
         </View>
@@ -1885,7 +2029,7 @@ const RecordTile = memo(function RecordTile({
   );
 });
 
-const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord, selection, folderName, onFolderMenu, enter, coverConnection, coverOwner }: {
+const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord, onAnalyze, selection, folderName, onFolderMenu, enter, coverConnection, coverOwner }: {
   enter?: number;
   record: PersonalVideoRecord;
   coverConnection?: ExploreConnection | null;
@@ -1893,6 +2037,7 @@ const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord,
   type: PersonalRecordType;
   privacy: boolean;
   onOpenRecord: (url: string) => Promise<void>;
+  onAnalyze?: (record: PersonalVideoRecord) => void;
   selection?: RecordSelection;
   folderName?: string;
   onFolderMenu?: (record: PersonalVideoRecord, at: MenuPoint) => void;
@@ -1902,8 +2047,8 @@ const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord,
   const accent = type === "liked_videos" ? color.accent : type === "favorite_videos" ? color.amber : color.cyan;
   const imageAvailable = Boolean(coverUrl);
   return (
+    <View ref={rowRef} style={styles.recordRowWrap}>
     <Pressable
-      ref={rowRef}
       accessibilityLabel={selection ? `${selection.disabled && !selection.checked ? "不可选择" : "选择视频"}：${record.title}` : `${privacy ? "已隐藏内容" : record.title}${record.url ? "，打开抖音视频" : ""}`}
       accessibilityRole={selection ? "checkbox" : record.url ? "link" : undefined}
       accessibilityState={selection ? { checked: selection.checked, disabled: selection.disabled } : undefined}
@@ -1937,6 +2082,11 @@ const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord,
       </View>
       {record.url && !selection ? <ArrowUpRight color={color.textMuted} size={19} /> : null}
     </Pressable>
+    {!selection && onAnalyze ? <Pressable accessibilityRole="button" accessibilityLabel="解析视频" onPress={() => onAnalyze(record)}
+      style={({ pressed }) => [styles.rowAnalyze, pressed && styles.recordRowPressed, webPointer]}>
+      <Sparkles color={color.textSecondary} size={15} /><Text style={styles.rowAuthor}>解析</Text>
+    </Pressable> : null}
+    </View>
   );
 });
 
@@ -2304,7 +2454,9 @@ const styles = StyleSheet.create({
   // 顶上 46 用 margin 而不是 padding：滚动时导航从折叠按钮下面滑过，而不是从它背后露出来
   sidebarBody: { flex: 1, marginTop: 46, marginHorizontal: -14, paddingHorizontal: 14 },
   sidebarNav: { gap: 4 },
-  navSection: { height: StyleSheet.hairlineWidth, marginVertical: 2, marginHorizontal: 8, backgroundColor: color.border },
+  navGroup: { height: 24, justifyContent: "flex-end", paddingHorizontal: 15, paddingBottom: 3 },
+  navGroupLabel: { color: color.textMuted, fontSize: 10, fontWeight: "600", letterSpacing: 3 },
+  navGroupRule: { position: "absolute", left: 8, right: 8, top: 12, height: StyleSheet.hairlineWidth, backgroundColor: color.border },
   activeDays: { flexDirection: "row", alignItems: "center", minHeight: 44, marginTop: 26, paddingHorizontal: 8 },
   activeDaysText: { flex: 1, color: color.textMuted, fontSize: 10, marginLeft: 7 },
   navButton: { position: "relative", minHeight: 52, flexDirection: "row", alignItems: "center", paddingHorizontal: 8, borderRadius: radius.medium },
@@ -2318,9 +2470,13 @@ const styles = StyleSheet.create({
   navIndicator: { position: "absolute", left: -14, top: 14, bottom: 14, width: 3, borderTopRightRadius: 2, borderBottomRightRadius: 2 },
   navGlider: { position: "absolute", left: -14, width: 3, height: 24, borderTopRightRadius: 2, borderBottomRightRadius: 2 },
   sidebarFooter: { gap: 8 },
-  settingsButton: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 17, borderWidth: 1, borderColor: color.border, borderRadius: radius.medium, backgroundColor: color.surface },
-  settingsIcon: { width: 19, height: 19 },
-  settingsButtonText: { flexShrink: 0, color: color.textSecondary, fontSize: 12, fontWeight: "600", letterSpacing: 2 },
+  accountAvatar: { width: 28, height: 28, borderRadius: 14 },
+  // 不垫底色：海报风格选中时整行的字和图标都染成墨色，垫了底色图标就糊成一块
+  accountAvatarEmpty: { alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: color.border },
+  accountDot: { position: "absolute", right: 2, bottom: 2, width: 9, height: 9, borderRadius: 5, borderWidth: 2, borderColor: color.sidebar },
+  accountCopy: { flex: 1, minWidth: 0, marginLeft: 7, marginRight: 6 },
+  accountName: { flex: 0, marginLeft: 0 },
+  accountNote: { marginTop: 2, color: color.textMuted, fontSize: 10 },
   main: { flex: 1, minWidth: 0, minHeight: 0, backgroundColor: "transparent" },
   mainMobile: { paddingBottom: 68 },
   topbar: { height: 72, flexDirection: "row", alignItems: "center", paddingHorizontal: 28, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: color.border, backgroundColor: "transparent" },
@@ -2336,6 +2492,8 @@ const styles = StyleSheet.create({
   reportUpdateNoticeText: { color: color.green, fontSize: 10, fontWeight: "800" },
   toolbarButton: { width: 46, height: 46, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: color.borderSoft, borderRadius: radius.medium, backgroundColor: color.surface },
   toolbarButtonActive: { borderColor: color.cyan, backgroundColor: color.cyanSoft },
+  replayButton: { height: 46, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 14, borderWidth: 1, borderColor: color.borderSoft, borderRadius: radius.medium, backgroundColor: color.surface },
+  replayButtonText: { color: color.textSecondary, fontSize: 12, fontWeight: "600", letterSpacing: 2 },
   galleryContent: { paddingHorizontal: 28, paddingTop: 18, paddingBottom: 42 },
   galleryContentMobile: { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 28 },
   galleryContentEmpty: { flexGrow: 1 },
@@ -2447,7 +2605,9 @@ const styles = StyleSheet.create({
   libraryTabTextOn: { color: color.text },
   libraryTabCount: { color: color.textMuted, fontSize: 11, fontVariant: ["tabular-nums"] },
   folderRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6, paddingBottom: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: color.border },
-  folderTabs: { flexShrink: 1, minWidth: 0, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 },
+  // 只露一行（芯片 30 高），排不下的折到第二行被裁掉；四周留 3px 给焦点框和悬停底色
+  folderTabsClip: { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 120, height: 36, margin: -3, padding: 3, overflow: "hidden" },
+  folderTabs: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 },
   folderRetry: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 },
   folderRetryText: { color: color.danger, fontSize: 12, lineHeight: 18 },
   folderChip: { height: 30, maxWidth: 220, flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, borderRadius: radius.small },
@@ -2466,7 +2626,9 @@ const styles = StyleSheet.create({
   dialogInput: { height: 40, color: color.text, fontSize: 13, paddingHorizontal: 11, borderWidth: 1, borderColor: color.border, borderRadius: radius.medium, backgroundColor: color.surfaceMuted },
   dialogError: { color: color.danger, fontSize: 12, lineHeight: 18, marginTop: -6 },
   dialogActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 },
-  recordRow: { minHeight: 112, flexDirection: "row", alignItems: "center", gap: 14, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: color.border },
+  recordRowWrap: { flexDirection: "row", alignItems: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: color.border },
+  recordRow: { flex: 1, minWidth: 0, minHeight: 112, flexDirection: "row", alignItems: "center", gap: 14, paddingVertical: 10 },
+  rowAnalyze: { minWidth: 48, minHeight: 44, marginLeft: 8, alignItems: "center", justifyContent: "center" },
   recordRowPressed: { backgroundColor: color.surface },
   rowThumb: { width: 72, height: 92, flexShrink: 0, alignItems: "center", justifyContent: "center", overflow: "hidden", borderRadius: radius.small },
   rowThumbImage: { width: "100%", height: "100%" },

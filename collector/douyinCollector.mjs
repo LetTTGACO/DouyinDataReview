@@ -36,12 +36,14 @@ import {
   downloadDouyinVideo,
   resolveDouyinStream,
   normalizeDouyinVideoUrl,
+  videoIdFromUrl,
   VideoDownloadError,
 } from "./videoDownloader.mjs";
 import { ChatSendError, validateChatSend } from "./chatSender.mjs";
 import { MyCommentStore, collectMyComments } from "./myComments.mjs";
 import { CreatorCenter } from "./creatorCenter.mjs";
 import { LiveRooms } from "./liveRoom.mjs";
+import { readDouyinFolders } from "./douyinFolders.mjs";
 import { DirectApiClient, loadDirectSession, saveDirectSession, sameDirectSession, needsDirectSessionRefresh } from "./directApi.mjs";
 import { readDirectCredentialMaterial, initializeDirectCredentialMaterial, completeDirectCredentialExport, requireDirectCredentials } from "./directCredentials.mjs";
 import { DirectChatClient } from "./directChat.mjs";
@@ -59,6 +61,8 @@ const INITIAL_HISTORY_DAYS = 7;
 const INITIAL_LIST_LIMIT = 200;
 const INITIAL_RECORDS_WARNING = "首次读取范围：观看历史最近 7 天，喜欢和收藏各最多 200 条；需要更多历史时可手动完整读取。";
 const TYPE_LABELS = { watch_history: "观看历史", liked_videos: "点赞列表", favorite_videos: "收藏列表" };
+const SHORT_LABELS = { watch_history: "观看", liked_videos: "点赞", favorite_videos: "收藏" };
+const PAGE_LABELS = { watch_history: "观看历史", liked_videos: "点赞", favorite_videos: "收藏" };
 // 某一类接口给的东西用不了、或者翻不下去时只跳过这一类（抖音桌面端的登录态读点赞就回空响应）；
 // 登录失效、限流、要验证这些是整个会话的问题，照旧停下
 const SKIPPABLE_LIST_ERRORS = new Set(["invalid_json", "schema_changed", "http_error", "pagination_stalled", "pagination_missing"]);
@@ -529,7 +533,7 @@ export class DouyinCollector {
       // A browser's short token can expire while the imported login remains
       // usable. Verify the actual HTTP identity before asking for a new import.
       this.externalSessionState = "ready";
-    } catch { /* Missing, incomplete or expired credentials need an explicit CDP import. */ }
+    } catch (error) { this.reconnectCause = error; /* Missing, incomplete or expired credentials need an explicit CDP import. */ }
     this.updateStatus({
       counts: recordCounts(this.snapshot.records, this.snapshot.chatMessages, this.snapshot.chatConversations),
       updatedAt: this.snapshot.updatedAt,
@@ -581,11 +585,20 @@ export class DouyinCollector {
     if ((fromRequest && error.code !== "account_mismatch")
       || ["session_rejected", "verification_required", "write_credentials_missing"].includes(error.code)) return error;
     this.externalSessionState = "reconnect_required";
-    const problem = new DirectHistoryError("browser_reconnect_required", "导入的登录凭据已失效或不完整，请在设置 → 账号中重新扫码登录或连接浏览器，完成登录或验证后再次导入。");
-    // 调用方要分清是登录失效还是安全验证
-    problem.cause = error;
+    this.reconnectCause = error;
+    const problem = this.reconnectError(error);
     // Each caller owns its task state; only publish the shared credential flag here.
     this.updateStatus({});
+    return problem;
+  }
+
+  // 提示里带上原因的第一句，光看用户截图就能分清是被踢下线、账号不符还是凭据文件不全
+  reconnectError(cause) {
+    const reason = String(cause?.message ?? "").split(/[，。]/u)[0];
+    const problem = new DirectHistoryError("browser_reconnect_required",
+      `导入的登录凭据已失效或不完整${reason ? `（${reason}）` : ""}，请在设置 → 账号中重新扫码登录或连接浏览器，完成登录或验证后再次导入。`);
+    // 调用方要分清是登录失效还是安全验证
+    problem.cause = cause;
     return problem;
   }
 
@@ -811,8 +824,9 @@ export class DouyinCollector {
   async ensureDirectApi({ history = false, security = false, signal } = {}) {
     if (history) this.assertReadPermission("videos");
     signal?.throwIfAborted();
+    // 卡在「需要重连」时沿用当初的原因，别让后面每次重试都变成笼统的一句
     if (this.externalSessionState === "reconnect_required" && !this.externalConnection?.connected)
-      throw this.externalSessionError(new DirectHistoryError("direct_session_missing", "请重新导入登录凭据。"));
+      throw this.reconnectError(this.reconnectCause);
     if (this.accountMismatch) throw accountMismatchError();
     if (this.directApiPromise) {
       const api = await this.directApiPromise;
@@ -1123,6 +1137,34 @@ export class DouyinCollector {
     return true;
   }
 
+  /** 复用播放器的下载队列和账号权限；取消解析只影响它自己发起的下载。 */
+  async downloadVideoForAnalysis(videoId, signal) {
+    signal.throwIfAborted();
+    const { id } = this.startVideoDownload(`https://www.douyin.com/video/${videoId}`);
+    const job = this.videoDownloadJobs.get(id);
+    const run = this.videoDownloadQueue;
+    let stop;
+    const cancelled = new Promise((_, reject) => {
+      stop = () => {
+        if (job.status === "queued") this.touchVideoDownloadJob(job, { status: "failed", errorCode: "cancelled" });
+        job.controller?.abort();
+        reject(signal.reason);
+      };
+      signal.addEventListener("abort", stop, { once: true });
+    });
+    try {
+      await Promise.race([run, cancelled]);
+      signal.throwIfAborted();
+      const file = this.getVideoDownloadFilePath(id);
+      if (!file) throw Object.assign(new Error(job.error || "没有取得原片。"), { code: job.errorCode || "download_failed" });
+      if (/\.zip$/iu.test(file) || (job.video?.videoId && String(job.video.videoId) !== videoId))
+        throw Object.assign(new Error("取得的文件不是当前作品的视频。"), { code: "not_video" });
+      return file;
+    } finally {
+      signal.removeEventListener("abort", stop);
+    }
+  }
+
   /** The player's <video> cannot send the session header, so each playback job carries its own key. */
   playbackStream(jobId, key, live = null) {
     if (!this.getReadPermissions().videos) return null;
@@ -1133,7 +1175,7 @@ export class DouyinCollector {
     // Playing can outlast the orphan timer; the player's DELETE or retention pruning ends it now.
     clearTimeout(job.releaseTimer);
     this.touchVideoDownloadJob(job);
-    if (live === null) return job.stream.url ? job.stream : null;
+    if (live === null) return job.stream.url || job.stream.cachedFile ? job.stream : null;
     const url = job.stream.images?.[Number(live)]?.live;
     return url ? { url, referer: job.stream.referer } : null;
   }
@@ -1186,6 +1228,15 @@ export class DouyinCollector {
       error: null,
     });
     try {
+      if (job.playback) {
+        const cachedFile = await this.videoAnalysis?.cachedSource(videoIdFromUrl(job.sourceUrl));
+        if (cachedFile) {
+          controller.signal.throwIfAborted();
+          job.stream = { cachedFile };
+          this.touchVideoDownloadJob(job, { status: "complete", completedAt: new Date().toISOString() });
+          return;
+        }
+      }
       if (this.visibleBrowserWorkRunning()) {
         throw new VideoDownloadError("collector_busy", "采集器正在执行其他任务，请稍后再试。", { retryable: true });
       }
@@ -1320,11 +1371,15 @@ export class DouyinCollector {
     };
   }
 
-  startSync({ mode = "full_records" } = {}) {
+  // types：只读其中几类（只读观看历史、只读喜欢…），不给或给错就三类都读
+  startSync({ mode = "full_records", types } = {}) {
     this.assertReadPermission("videos");
     if (this.syncPromise) return false;
     this.syncStopRequested = false;
     const full = mode === "full_records";
+    const picked = REQUIRED_TYPES.filter((type) => Array.isArray(types) && types.includes(type));
+    const readTypes = picked.length ? picked : REQUIRED_TYPES;
+    const names = readTypes.map((type) => SHORT_LABELS[type]).join("、").replace(/、([^、]*)$/u, "和$1");
     this.syncMode = "direct_records";
     const runId = this.syncRunId + 1;
     this.syncRunId = runId;
@@ -1334,11 +1389,11 @@ export class DouyinCollector {
       syncFull: full,
       newRecords: { run: runId, count: 0 },
       state: "collecting",
-      phase: "watch_history",
+      phase: readTypes[0],
       progress: null,
-      message: full ? "正在读取全部观看、点赞和收藏记录" : "正在读取新增观看、点赞和收藏记录",
+      message: `正在读取${full ? "全部" : "新增"}${names}记录`,
     });
-    const promise = this.runDirectRecords(runId, { full })
+    const promise = this.runDirectRecords(runId, { full, types: readTypes })
       .catch((error) => {
         if (error instanceof CollectorCancelledError || runId !== this.syncRunId) return;
         this.updateStatus({
@@ -1393,8 +1448,8 @@ export class DouyinCollector {
     return true;
   }
 
-  startDirectRecords() {
-    return this.startSync({ mode: "direct_records" });
+  startDirectRecords({ types } = {}) {
+    return this.startSync({ mode: "direct_records", types });
   }
 
   // 聊天接收独立于接口记录读取和视频下载。
@@ -1986,7 +2041,7 @@ export class DouyinCollector {
     return loadDirectHistoryTemplate(this.dataDirectory);
   }
 
-  async runDirectRecords(runId, { full = false } = {}) {
+  async runDirectRecords(runId, { full = false, types = REQUIRED_TYPES } = {}) {
     this.assertSyncActive(runId);
     // 核对时发现浏览器里登录的是别的号：登回原来的号之前不用那份登录态读，也别关掉用户正拿来换号的窗口
     if (this.accountMismatch) throw accountMismatchError();
@@ -2001,9 +2056,9 @@ export class DouyinCollector {
       let pendingBoundary = this.snapshot.pendingWatchHistoryBoundary ?? null;
       if (!full && pendingBoundary) incrementalByType.set("watch_history", true);
       const initialByType = new Map(REQUIRED_TYPES.map(type => [type, !full && !incrementalByType.get(type)]));
-      const hasInitial = REQUIRED_TYPES.some(type => initialByType.get(type));
+      const hasInitial = types.some(type => initialByType.get(type));
       const historySince = Date.now() - INITIAL_HISTORY_DAYS * 86_400_000;
-      const allIncremental = REQUIRED_TYPES.every((type) => incrementalByType.get(type));
+      const allIncremental = types.every((type) => incrementalByType.get(type));
       const knownIds = new Map(REQUIRED_TYPES.map((type) => [
         type,
         new Set(incrementalByType.get(type) ? existingRecords[type].map((record) => record.id) : []),
@@ -2044,7 +2099,7 @@ export class DouyinCollector {
         ["watch_history", DIRECT_HISTORY_ENDPOINT],
         ["liked_videos", DIRECT_LIKED_ENDPOINT],
         ["favorite_videos", DIRECT_FAVORITE_ENDPOINT],
-      ];
+      ].filter(([type]) => types.includes(type));
 
       const trackResult = (type, result) => {
         returnedCounts.set(type, returnedCounts.get(type) + result.pageSize);
@@ -2110,7 +2165,7 @@ export class DouyinCollector {
         const newCounts = Object.fromEntries(REQUIRED_TYPES.map((kind) => [kind, newIds.get(kind).size]));
         const warnings = [...new Set([
           ...(finalPhase
-            ? [`${DIRECT_COMPLETE_WARNING_PREFIX}新增观看 ${newCounts.watch_history}、点赞 ${newCounts.liked_videos}、收藏 ${newCounts.favorite_videos}；读取观看历史 ${pageCounts.watch_history} 页、点赞 ${pageCounts.liked_videos} 页、收藏 ${pageCounts.favorite_videos} 页。`]
+            ? [`${DIRECT_COMPLETE_WARNING_PREFIX}新增${types.map((kind) => `${SHORT_LABELS[kind]} ${newCounts[kind]}`).join("、")}；读取${types.map((kind) => `${PAGE_LABELS[kind]} ${pageCounts[kind]} 页`).join("、")}。`]
             : completed ? [`无界面读取阶段完成：${TYPE_LABELS[type]}已保存，其他分类继续读取。`] : []),
           ...(!full && (hasInitial || this.snapshot.warnings.includes(INITIAL_RECORDS_WARNING)) ? [INITIAL_RECORDS_WARNING] : []),
           ...skipped.map(({ kind, message, pages }) => (pages
@@ -2218,9 +2273,18 @@ export class DouyinCollector {
         }
         await persistCompletedType(type, phaseIndex === phases.length - 1);
       }
+      // 收藏夹分组也是附加信息：读不全就不动本地文件夹，下次再对
+      if (this.onDouyinFolders && types.includes("favorite_videos")) {
+        this.updateStatus({ phase: "favorite_videos", message: "正在读取收藏夹分组" });
+        const folders = await readDouyinFolders(context).catch(() => null);
+        this.assertSyncActive(runId);
+        if (folders) await this.onDouyinFolders(folders).catch(() => {});
+      }
+      // 直播和看完标记跟着观看历史读，评论回复只在三类都读时顺带读：只读喜欢就只读喜欢
+      const readsWatch = types.includes("watch_history");
       // 直播记录只是观看历史的附加分栏：改版、读不到都不影响上面已经存好的视频记录
-      this.updateStatus({ phase: "watch_history", message: "正在读取看过的直播" });
-      const liveRecords = await collectLiveHistoryRecords(context, { sinceMs: full ? -Infinity : historySince }).catch(() => []);
+      if (readsWatch) this.updateStatus({ phase: "watch_history", message: "正在读取看过的直播" });
+      const liveRecords = readsWatch ? await collectLiveHistoryRecords(context, { sinceMs: full ? -Infinity : historySince }).catch(() => []) : [];
       this.assertSyncActive(runId);
       const withLive = mergeRecordList("watch_history", stagedRecords.watch_history, liveRecords);
       const liveAdded = withLive.length - stagedRecords.watch_history.length;
@@ -2238,12 +2302,12 @@ export class DouyinCollector {
         await saveStaged();
       }
       // 看完标记也是附加信息：读不到就沿用按时间的估算，不影响上面已经存好的记录
-      this.updateStatus({ phase: "watch_history", message: "正在读取看完标记" });
-      const completion = await this.readCompletedWatchTimes(context, runId, Math.max(completionScanFloor(stagedRecords.watch_history), full ? -Infinity : historySince))
+      if (readsWatch) this.updateStatus({ phase: "watch_history", message: "正在读取看完标记" });
+      const completion = readsWatch ? await this.readCompletedWatchTimes(context, runId, Math.max(completionScanFloor(stagedRecords.watch_history), full ? -Infinity : historySince))
         .catch((error) => {
           if (error instanceof CollectorCancelledError) throw error;
           return null;
-        });
+        }) : null;
       this.assertSyncActive(runId);
       if (completion) {
         const labelled = labelWatchCompletion(stagedRecords.watch_history, completion.completed, completion.coveredFromMs);
@@ -2253,15 +2317,17 @@ export class DouyinCollector {
         }
       }
       // 我的评论也是附加信息：读不到不影响上面已经存好的记录。抖音那边只留最近 100 条，读到就并进本机这份
-      this.updateStatus({ phase: "watch_history", message: "正在读取评论回复" });
       let repliesAdded = 0;
-      await this.myComments.update(async (current) => {
-        const result = await collectMyComments(context, current, { signal: { throwIfAborted: () => this.assertSyncActive(runId) } });
-        repliesAdded = result.added;
-        return result.comments;
-      }).catch((error) => {
-        if (error instanceof CollectorCancelledError) throw error;
-      });
+      if (types.length === REQUIRED_TYPES.length) {
+        this.updateStatus({ phase: "watch_history", message: "正在读取评论回复" });
+        await this.myComments.update(async (current) => {
+          const result = await collectMyComments(context, current, { signal: { throwIfAborted: () => this.assertSyncActive(runId) } });
+          repliesAdded = result.added;
+          return result.comments;
+        }).catch((error) => {
+          if (error instanceof CollectorCancelledError) throw error;
+        });
+      }
       this.assertSyncActive(runId);
       const newCounts = Object.fromEntries(REQUIRED_TYPES.map((type) => [type, newIds.get(type).size]));
       this.updateStatus({
@@ -2269,10 +2335,9 @@ export class DouyinCollector {
         phase: null,
         progress: null,
         message: (allIncremental
-          ? `已读取新增记录（观看 ${newCounts.watch_history}、点赞 ${newCounts.liked_videos}、收藏 ${newCounts.favorite_videos}${liveAdded > 0 ? `、直播 ${liveAdded}` : ""}${repliesAdded > 0 ? `、评论回复 ${repliesAdded}` : ""}）`
-          : full
-            ? `已读取并合并全部可见记录（观看 ${stagedRecords.watch_history.length}、点赞 ${stagedRecords.liked_videos.length}、收藏 ${stagedRecords.favorite_videos.length}）`
-            : `已完成首次范围读取（观看历史最近 7 天，喜欢和收藏各最多 200 条；新增观看 ${newCounts.watch_history}、点赞 ${newCounts.liked_videos}、收藏 ${newCounts.favorite_videos}）`)
+          ? `已读取新增记录（${types.map((type) => `${SHORT_LABELS[type]} ${newCounts[type]}`).join("、")}${liveAdded > 0 ? `、直播 ${liveAdded}` : ""}${repliesAdded > 0 ? `、评论回复 ${repliesAdded}` : ""}）`
+          : full ? `已读取并合并全部可见记录（${types.map((type) => `${SHORT_LABELS[type]} ${stagedRecords[type].length}`).join("、")}）`
+            : `已完成首次范围读取（观看历史最近 7 天，喜欢和收藏各最多 200 条；新增${types.map((type) => `${SHORT_LABELS[type]} ${newCounts[type]}`).join("、")}）`)
           + skipped.map(({ kind, message, pages }) => `；${TYPE_LABELS[kind]}${pages ? `在第 ${pages + 1} 页停下了` : "这次没读到"}（${message.replace(/。$/u, "")}）`).join(""),
         counts: recordCounts(this.snapshot.records, this.snapshot.chatMessages, this.snapshot.chatConversations),
         updatedAt: this.snapshot.updatedAt,
@@ -2315,6 +2380,7 @@ export class DouyinCollector {
 
   // 换账号前把这个账号的活全收掉：关直播间和浏览器，再等挂着的读取、监听、下载和存盘落地
   async shutdown() {
+    await this.videoAnalysis?.stop();
     clearTimeout(this.liveRooms.releaseTimer);
     await this.liveRooms.closeAll({ release: false });
     await this.close();

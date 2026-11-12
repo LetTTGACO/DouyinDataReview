@@ -5,6 +5,8 @@ import {
   Linking,
   Platform,
   StyleSheet,
+  Text,
+  View,
 } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { confirmAlert } from "./src/services/confirmAlert";
@@ -34,6 +36,7 @@ import {
 import {
   countPersonalRecords,
   createEmptyPersonalRecords,
+  PERSONAL_RECORD_TYPES,
   type PersonalArchiveData,
   type PersonalRecordCollection,
   type PersonalRecordType,
@@ -86,7 +89,6 @@ import {
   importPersonalArchive,
 } from "./src/services/importPersonalArchive";
 import {
-  canSendToReelLab,
   checkDesktopUpdates,
   downloadDesktopUpdate,
   getDesktopCollectorConfig,
@@ -95,8 +97,6 @@ import {
   isDesktopApp,
   isDesktopWindowHidden,
   notifyDesktopBackgroundSyncBlocked,
-  REELLAB_DOWNLOAD_URL,
-  sendDesktopToReelLab,
   subscribeDesktopBackgroundSync,
   subscribeDesktopUpdateState,
   trackDesktopWindowVisibility,
@@ -105,7 +105,7 @@ import {
 import { shouldAutoSync, shouldSuppressBrowserLoginAutoSync } from "./src/services/autoSync";
 import { createChatAutomaticRequestTracker, createChatStartupRequest } from "./src/services/chatStartup";
 import { sparkRenewJob } from "./src/services/sparkRenew";
-import { applyAppStyle, buildArchiveStoryUrl, buildPosterStoryUrl, buildStoryEntryUrl, loadAppStyle, loadAssistantInstalled, loadAutoSync, loadFeedShown, loadStoryStyle, resolveStoryStyle, saveAppStyle, saveAssistantInstalled, saveAutoSync, saveFeedShown, saveStoryStyle, type AppStyle, type StoryStyle } from "./src/services/appStyle";
+import { applyAppStyle, buildArchiveStoryUrl, buildPosterStoryUrl, buildStoryEntryUrl, loadAppStyle, loadAssistantInstalled, loadAutoSync, loadFeedShown, loadReadTypes, loadStoryStyle, resolveStoryStyle, saveAppStyle, saveAssistantInstalled, saveAutoSync, saveFeedShown, saveReadTypes, saveStoryStyle, type AppStyle, type StoryStyle } from "./src/services/appStyle";
 import { getAssistant, type AssistantVideo, type AssistantView } from "./src/services/assistant";
 import { loadDismissedNotices, loadSiteNotices, saveDismissedNotices, type SiteNotices } from "./src/services/siteNotice";
 import { RELEASE_NOTES } from "./src/components/workspace/releaseNotes";
@@ -115,10 +115,12 @@ import { buildStoryData, clearStoryData, writeStoryData } from "./src/services/s
 import { buildReportModel } from "./src/components/workspace/ReportWorkspace";
 import { ExploreWorkspace, FeedWorkspace } from "./src/components/workspace/ExploreWorkspace";
 import { DataExportDialog } from "./src/components/workspace/DataExportDialog";
+import { READ_TYPE_NAMES } from "./src/components/workspace/ReadTypePicker";
 import { SingleDownloadDialog, type DownloadOptions } from "./src/components/workspace/DownloadOptionsPicker";
 import { zipVideoFiles } from "./src/services/batchVideoDownload";
 import { countAchievement, noteAchievementWorks, syncDataAchievements, unlockAchievement } from "./src/components/workspace/achievements";
 import { buildDataExportWithVoice, type DataExportSelection } from "./src/services/exportData";
+import { readRecordFolders, type RecordFolders } from "./src/services/recordFolders";
 import { CreatorWorkspace } from "./src/components/workspace/CreatorWorkspace";
 // @ts-expect-error react-native-web 没给内部模块出类型
 import VirtualizedList from "react-native-web/dist/vendor/react-native/VirtualizedList";
@@ -269,9 +271,13 @@ function AppContent() {
   const [collectorSnapshot, setCollectorSnapshot] = useState<CollectorSnapshot | null>(null);
   const [exportSnapshot, setExportSnapshot] = useState<CollectorSnapshot | null>(null);
   const [exportProgress, setExportProgress] = useState<{ completed: number; total: number } | null>(null);
+  // 导出成功的轻提示：不用 alert，桌面版这时正弹着系统保存框，两个模态会叠在一起
+  const [exportToast, setExportToast] = useState<string | null>(null);
+  useEffect(() => { if (!exportToast) return; const timer = setTimeout(() => setExportToast(null), 3_500); return () => clearTimeout(timer); }, [exportToast]);
   const exportControllerRef = useRef<AbortController | null>(null);
   const exportAccountRef = useRef<string | null>(null);
   const currentExportAccountRef = useRef<string | null>(null);
+  const exportFoldersRef = useRef<RecordFolders | null>(null);
   currentExportAccountRef.current = collectorStatus?.account?.id ?? null;
   useEffect(() => {
     exportControllerRef.current?.abort();
@@ -283,6 +289,8 @@ function AppContent() {
   const [collectorBusy, setCollectorBusy] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(() => (Platform.OS === "web" ? loadAutoSync() : true));
+  // 读哪几类：增量、完整和自动补读都照这个读
+  const [readTypes, setReadTypes] = useState(() => loadReadTypes());
   const [stoppingSync, setStoppingSync] = useState(false);
   const [switchingAccount, setSwitchingAccount] = useState(false);
   // 首屏正在扫码登录或导入凭据（桌面版）：同样挡住读取和换号，但界面上不写成「正在切换账号」
@@ -293,8 +301,6 @@ function AppContent() {
   const sparkRenewing = useSyncExternalStore(sparkRenewJob.subscribe, sparkRenewJob.snapshot)?.running === true;
   const [collectorError, setCollectorError] = useState<string | null>(null);
   const [downloadStates, setDownloadStates] = useState<Record<string, RecordDownloadState>>({});
-  // 「送去拆片工坊」的进度，和下载一样按记录 id 记；同时在送的任务也记在 downloadInFlightRef 里（键带 reellab: 前缀）
-  const [sendStates, setSendStates] = useState<Record<string, RecordDownloadState>>({});
   const [downloadJobs, setDownloadJobs] = useState<Record<string, VideoDownloadJob>>({});
   const [downloadChoice, setDownloadChoice] = useState<{ record: PersonalVideoRecord; keepExplore: boolean } | null>(null);
   const [batchDownloadActive, setBatchDownloadActive] = useState(false);
@@ -841,8 +847,8 @@ function AppContent() {
     setCollectorError(null);
     try {
       const status = incremental
-        ? await startDirectRecordsSync(baseUrl, token)
-        : await startCollectorSync(baseUrl, token);
+        ? await startDirectRecordsSync(baseUrl, token, readTypes)
+        : await startCollectorSync(baseUrl, token, readTypes);
       if (pollRequest.current !== requestId) return;
       setCollectorStatus(status);
       void pollCollector(baseUrl, token, requestId);
@@ -1179,6 +1185,8 @@ function AppContent() {
     return status;
   }
 
+  const readTypeNames = readTypes.map((type) => READ_TYPE_NAMES[type]).join("、").replace(/、([^、]*)$/u, "和$1");
+
   function confirmFullSync() {
     if (!collectorToken || collectorBusy || syncConfirmationOpenRef.current) return;
     if (!canReadCollector(collectorStatus, "videos")) { openLogin(); return; }
@@ -1186,7 +1194,7 @@ function AppContent() {
     syncConfirmationOpenRef.current = true;
     confirmAlert(
       "开始读取全部可见记录",
-      "使用已导入的凭据，通过接口分页读取观看历史、喜欢和收藏，全程无需打开浏览器。",
+      `使用已导入的凭据，通过接口分页读取${readTypeNames}，全程无需打开浏览器。`,
       "开始",
       (confirmed) => {
         syncConfirmationOpenRef.current = false;
@@ -1204,7 +1212,7 @@ function AppContent() {
     syncConfirmationOpenRef.current = true;
     confirmAlert(
       "增量读取",
-      "首次读取观看历史最近 7 天、喜欢和收藏各最多 200 条；之后补读新增记录，遇到本地已有记录就停止。需要更多历史时可手动选择「完整读取」。",
+      `这次读${readTypeNames}。首次读取观看历史最近 7 天、喜欢和收藏各最多 200 条，之后补读新增记录。需要更多历史时可选择「完整读取」。凭据失效时请到设置 → 账号重新连接浏览器并导入。`,
       "读取新记录",
       (confirmed) => {
         syncConfirmationOpenRef.current = false;
@@ -1246,7 +1254,6 @@ function AppContent() {
       setStoppingSync(false);
       setCollectorBusy(false);
       setDownloadStates({});
-      setSendStates({});
       setDownloadJobs({});
       setCollectorError(stopError
         ? `已断开应用，但无法确认采集任务已停止：${stopError}`
@@ -1290,7 +1297,6 @@ function AppContent() {
     removeArchive();
     setFrozenSnapshot(null);
     setDownloadStates({});
-    setSendStates({});
     setDownloadJobs({});
   }
 
@@ -1605,9 +1611,14 @@ function AppContent() {
     if (!collectorToken) return;
     const accountId = currentExportAccountRef.current;
     try {
-      const snapshot = await getCollectorRecords(collectorUrl, collectorToken);
+      // 文件夹读不到（采集器太旧、文件坏了）照样导出记录，只是不带文件夹
+      const [snapshot, folders] = await Promise.all([
+        getCollectorRecords(collectorUrl, collectorToken),
+        readRecordFolders({ baseUrl: collectorUrl, token: collectorToken }, accountId ?? undefined).catch(() => null),
+      ]);
       if (accountId !== currentExportAccountRef.current) return;
       exportAccountRef.current = accountId;
+      exportFoldersRef.current = folders?.lists ?? null;
       setPreferences(null);
       setExportSnapshot(snapshot);
     } catch (error) {
@@ -1622,7 +1633,7 @@ function AppContent() {
     setExportSnapshot(null);
   }
 
-  async function exportSelectedData(selection: DataExportSelection) {
+  async function exportSelectedData(selection: DataExportSelection, since: string | null = null) {
     if (!exportSnapshot || exportControllerRef.current) return;
     const controller = new AbortController();
     exportControllerRef.current = controller;
@@ -1630,13 +1641,16 @@ function AppContent() {
       const data = await buildDataExportWithVoice(exportSnapshot, selection, {
         connection: collectorToken ? { baseUrl: collectorUrl, token: collectorToken } : null,
         accountId: exportAccountRef.current, signal: controller.signal,
-        onProgress: setExportProgress,
+        onProgress: setExportProgress, since, folders: exportFoldersRef.current,
       });
       controller.signal.throwIfAborted();
-      triggerBrowserDownload(new Blob([JSON.stringify(data)], { type: "application/json" }), `抖音数据_${new Date().toLocaleDateString("sv-SE")}.json`);
+      // 带到秒：同一天导出多次不重名（文件名里不能有冒号）
+      const fileName = `抖音数据_${new Date().toLocaleString("sv-SE").replace(" ", "_").replace(/:/g, "-")}.json`;
+      triggerBrowserDownload(new Blob([JSON.stringify(data)], { type: "application/json" }), fileName);
       countAchievement("export");
       setExportSnapshot(null);
       if (data.warnings.length) showAlert("已导出，部分语音未转写", data.warnings.join("\n"));
+      else setExportToast(`已导出 ${fileName}`);
     } catch (error) { if (!controller.signal.aborted) showAlert("无法导出数据", collectorErrorMessage(error)); }
     finally {
       if (exportControllerRef.current === controller) {
@@ -1744,71 +1758,6 @@ function AppContent() {
       showAlert("下载失败", error instanceof LocalCollectorError ? error.message : "视频下载失败，请稍后重试。");
     } finally {
       downloadInFlightRef.current.delete(record.id);
-    }
-  }
-
-  // 「送去拆片工坊」：先像下载按钮那样让采集器下好视频（正常清晰度），再由桌面外壳复制进拆片工坊的收件箱、叫醒它。
-  // keepExplore：从探索页发起的，下载时别关掉探索会话。返回 true 表示送到了
-  async function sendRecordToReelLab(record: PersonalVideoRecord, keepExplore = false): Promise<boolean> {
-    const sourceUrl = record.url?.trim();
-    if (!sourceUrl) {
-      showAlert("送不过去", "该记录没有可用的抖音链接。");
-      return false;
-    }
-    const token = collectorToken;
-    const baseUrl = collectorUrl;
-    if (!token) {
-      showAlert("需要连接采集器", "请先在“连接与采集”页面连接本地采集服务，再送去拆片工坊。");
-      return false;
-    }
-    const flight = `reellab:${record.id}`;
-    if (downloadInFlightRef.current.has(flight)) return false;
-    const requestId = downloadRequestRef.current;
-    downloadInFlightRef.current.add(flight);
-    const mark = (state: RecordDownloadState) => setSendStates((current) => ({ ...current, [record.id]: state }));
-    mark("queued");
-    try {
-      let job = await startCollectorVideoDownload(baseUrl, token, sourceUrl, undefined, false, keepExplore);
-      const deadline = Date.now() + DOWNLOAD_JOB_TIMEOUT_MS;
-      while (job.status === "queued" || job.status === "running") {
-        if (downloadRequestRef.current !== requestId) return false;
-        mark(job.status);
-        if (Date.now() >= deadline) throw new LocalCollectorError("timeout", "视频下载超时，请稍后重试。");
-        await delay(DOWNLOAD_JOB_POLL_INTERVAL_MS);
-        job = await getCollectorVideoDownload(baseUrl, token, job.id);
-      }
-      if (downloadRequestRef.current !== requestId) return false;
-      if (job.status !== "complete") {
-        throw new LocalCollectorError(job.errorCode ?? "download_failed", job.error ?? "视频下载失败，请稍后重试。");
-      }
-      const result = await sendDesktopToReelLab({
-        jobId: job.id,
-        title: record.title,
-        author: record.author,
-        url: sourceUrl,
-        // 记录里没有单独的简介：抖音的标题就是简介那段话
-        description: null,
-        durationSeconds: record.durationSeconds ?? null,
-      });
-      if (result.status === "not_installed") {
-        mark("idle");
-        confirmAlert("还没装拆片工坊", "拆片工坊是单独的应用，装好后再点一次视频上的「送去」按钮就行。现在去下载吗？", "去下载", (confirmed) => {
-          if (confirmed) void openRecord(REELLAB_DOWNLOAD_URL);
-        });
-        return false;
-      }
-      if (result.status === "failed") throw new LocalCollectorError("send_failed", result.message);
-      mark("complete");
-      // 已经放进收件箱了，只是没叫醒：按送到算，别让人重送出一份重复的
-      if (result.wakeFailed) showAlert("已送到拆片工坊", "视频已经放好了，但没能自动打开拆片工坊。手动打开它就能看到。");
-      return true;
-    } catch (error) {
-      if (downloadRequestRef.current !== requestId) return false;
-      mark("failed");
-      showAlert("没送到拆片工坊", error instanceof LocalCollectorError ? error.message : "请稍后重试。");
-      return false;
-    } finally {
-      downloadInFlightRef.current.delete(flight);
     }
   }
 
@@ -1971,12 +1920,97 @@ function AppContent() {
     saveAutoSync(!value);
     return !value;
   });
+  // 至少留一类：最后一个勾不掉
+  const toggleReadType = (type: PersonalRecordType) => setReadTypes((current) => {
+    const next = PERSONAL_RECORD_TYPES.map((item) => item.id).filter((item) => (item === type) !== current.includes(item));
+    if (!next.length) return current;
+    saveReadTypes(next);
+    return next;
+  });
   const syncingRecords = isCollectorSyncing(collectorToken !== null, collectorStatus);
-  const recordDownloading = batchDownloadActive || [...Object.values(downloadStates), ...Object.values(sendStates)].some((state) => state === "queued" || state === "running");
-  // 「送去拆片工坊」只有桌面版有：要靠外壳把文件复制进拆片工坊的收件箱
-  const reelLabReady = canSendToReelLab();
+  const recordDownloading = batchDownloadActive || Object.values(downloadStates).some((state) => state === "queued" || state === "running");
   const loginBlocked = accountBlockedReason({ switchingAccount, syncing: syncingRecords, busy: collectorBusy, downloading: recordDownloading, sparkRenewing });
   const accountName = activeAccountName(collectorToken !== null, collectorStatus, collectorAccounts);
+
+  // web 上「连接与采集」是工作台外壳里的一页，侧栏一直在；native 还是整屏
+  const setupPage = activeView === "sources" ? (
+    <SetupWorkspace
+      archive={archiveInfo}
+      busy={collectorBusy}
+      collectorUrl={collectorUrl}
+      connected={collectorToken !== null}
+      error={collectorError}
+      onChangeCollectorUrl={(value) => {
+        setCollectorUrl(value);
+        setCollectorError(null);
+      }}
+      onChangePairingCode={(value) => {
+        setPairingCode(value);
+        setCollectorError(null);
+      }}
+      onClearCache={clearCurrentRecords}
+      onExportData={exportCurrentData}
+      onConnect={() => {
+        userDisconnectedRef.current = false;
+        return connectCollector({ automaticPairing: true });
+      }}
+      onDisconnect={disconnectCollector}
+      onEnterWorkspace={enterWorkspace}
+      onOpenDashboard={openDashboard}
+      onPickArchive={pickArchive}
+      onRemoveArchive={removeArchive}
+      onMergeArchive={mergeArchive}
+      onStartIncrementalSync={confirmIncrementalSync}
+      onStartChatObservation={() => {
+        chatStartupRef.current.cancel();
+        chatAutomaticRequestRef.current.clear();
+        return collectorToken ? beginChatObservation(collectorUrl, collectorToken) : Promise.resolve();
+      }}
+      onCollectChatHistory={() => collectorToken
+        ? collectChatHistory(collectorUrl, collectorToken)
+        : Promise.resolve()}
+      onStartFullSync={confirmFullSync}
+      onStopSync={() => collectorToken ? endSync(collectorUrl, collectorToken) : Promise.resolve()}
+      onStopChatObservation={() => collectorToken ? endChatObservation(collectorUrl, collectorToken).then(() => undefined) : Promise.resolve()}
+      accounts={collectorAccounts}
+      downloading={recordDownloading}
+      sparkRenewing={sparkRenewing}
+      onActivateAccount={(id) => void changeAccount({ id })}
+      onAddAccount={() => void changeAccount({ add: true })}
+      onRemoveAccount={confirmRemoveAccount}
+      autoSyncEnabled={autoSyncEnabled}
+      onToggleAutoSync={toggleAutoSync}
+      readTypes={readTypes}
+      onToggleReadType={toggleReadType}
+      appStyle={appStyle}
+      onOpenPreferences={openPreferences}
+      desktopLogin={isDesktopApp() ? { baseUrl: collectorUrl, token: collectorToken, blocked: Boolean(loginBlocked), loggingIn,
+        onBusyChange: (busy) => { setSwitchingAccount(busy); setLoggingIn(busy); }, onChange: adoptBrowserLogin } : null}
+      chatBusy={chatControlBusy}
+      chatCollecting={isChatReceiving(collectorStatus)}
+      pairingCode={pairingCode}
+      pickingArchive={pickingArchive}
+      records={workspaceRecords}
+      chatCount={chatCount}
+      snapshotSource={displaySnapshot?.source ?? null}
+      snapshotUpdatedAt={displaySnapshot?.updatedAt ?? null}
+      status={collectorStatus}
+      stoppingSync={stoppingSync}
+      switchingAccount={switchingAccount}
+      appUpdate={appUpdate}
+      onCheckAppUpdate={checkForAppUpdates}
+      onDownloadAppUpdate={downloadAppUpdate}
+      onInstallAppUpdate={installAppUpdate}
+      embedded={storyMode}
+    />
+  ) : null;
+  // 侧栏切页：从「连接与采集」点过去就是进工作台
+  const changeDashboardView = (view: LegacyWorkspaceViewKey) => {
+    if (view === "sources") { openSettings(); return; }
+    setDashboardView(view);
+    setDashboardOpen(true);
+    if (activeView === "sources") setActiveView("summary");
+  };
 
   return (
     <SafeAreaView edges={["top", "bottom"]} style={styles.safeArea}>
@@ -1986,85 +2020,19 @@ function AppContent() {
         ? <CredentialBanner onLogin={openLogin} onDismiss={() => setLoginNoticeHidden(true)} /> : null}
       {siteNotice && activeView !== "sources"
         ? <SiteNoticeBanner text={siteNotice.text} url={siteNotice.url} onOpen={(url) => void Linking.openURL(url).catch(() => undefined)} onDismiss={() => dismissSiteNotice(siteNotice.id)} /> : null}
-      {activeView === "sources" ? (
-        <SetupWorkspace
-          archive={archiveInfo}
-          busy={collectorBusy}
-          collectorUrl={collectorUrl}
-          connected={collectorToken !== null}
-          error={collectorError}
-          onChangeCollectorUrl={(value) => {
-            setCollectorUrl(value);
-            setCollectorError(null);
-          }}
-          onChangePairingCode={(value) => {
-            setPairingCode(value);
-            setCollectorError(null);
-          }}
-          onClearCache={clearCurrentRecords}
-          onExportData={exportCurrentData}
-          onConnect={() => {
-            userDisconnectedRef.current = false;
-            return connectCollector({ automaticPairing: true });
-          }}
-          onDisconnect={disconnectCollector}
-          onEnterWorkspace={enterWorkspace}
-          onOpenDashboard={openDashboard}
-          onPickArchive={pickArchive}
-          onRemoveArchive={removeArchive}
-          onMergeArchive={mergeArchive}
-          onStartIncrementalSync={confirmIncrementalSync}
-          onStartChatObservation={() => {
-            chatStartupRef.current.cancel();
-            chatAutomaticRequestRef.current.clear();
-            return collectorToken ? beginChatObservation(collectorUrl, collectorToken) : Promise.resolve();
-          }}
-          onCollectChatHistory={() => collectorToken
-            ? collectChatHistory(collectorUrl, collectorToken)
-            : Promise.resolve()}
-          onStartFullSync={confirmFullSync}
-          onStopSync={() => collectorToken ? endSync(collectorUrl, collectorToken) : Promise.resolve()}
-          onStopChatObservation={() => collectorToken ? endChatObservation(collectorUrl, collectorToken).then(() => undefined) : Promise.resolve()}
-          accounts={collectorAccounts}
-          downloading={recordDownloading}
-          sparkRenewing={sparkRenewing}
-          onActivateAccount={(id) => void changeAccount({ id })}
-          onAddAccount={() => void changeAccount({ add: true })}
-          onRemoveAccount={confirmRemoveAccount}
-          autoSyncEnabled={autoSyncEnabled}
-          onToggleAutoSync={toggleAutoSync}
-          appStyle={appStyle}
-          onOpenPreferences={openPreferences}
-          desktopLogin={isDesktopApp() ? { baseUrl: collectorUrl, token: collectorToken, blocked: Boolean(loginBlocked), loggingIn,
-            onBusyChange: (busy) => { setSwitchingAccount(busy); setLoggingIn(busy); }, onChange: adoptBrowserLogin } : null}
-          chatBusy={chatControlBusy}
-          chatCollecting={isChatReceiving(collectorStatus)}
-          pairingCode={pairingCode}
-          pickingArchive={pickingArchive}
-          records={workspaceRecords}
-          chatCount={chatCount}
-          snapshotSource={displaySnapshot?.source ?? null}
-          snapshotUpdatedAt={displaySnapshot?.updatedAt ?? null}
-          status={collectorStatus}
-          stoppingSync={stoppingSync}
-          switchingAccount={switchingAccount}
-          appUpdate={appUpdate}
-          onCheckAppUpdate={checkForAppUpdates}
-          onDownloadAppUpdate={downloadAppUpdate}
-          onInstallAppUpdate={installAppUpdate}
-        />
-      ) : dashboardOpen || storyMode ? (
+      {activeView === "sources" && !storyMode ? setupPage : dashboardOpen || storyMode ? (
         <LegacyContentWorkspace
+          sources={setupPage}
           foldersRevision={assistantView?.foldersRevision}
           // 年志盖在工作台上面时别让刷视频在底下接着放
-          feed={!feedShown ? undefined : storySrc ? null : <FeedWorkspace connection={collectorToken ? { baseUrl: collectorUrl, token: collectorToken } : null} onOpenSettings={openSettings} onOpenRecord={openRecord}
+          feed={!feedShown ? undefined : storySrc ? null : <FeedWorkspace connection={collectorToken ? { baseUrl: collectorUrl, token: collectorToken } : null} accountId={collectorStatus?.account?.id ?? null} onOpenSettings={openSettings} onOpenRecord={openRecord}
             onDownloadRecord={(record) => downloadRecord(record, true)} downloadStates={downloadStates} />}
-          explore={<ExploreWorkspace connection={collectorToken ? { baseUrl: collectorUrl, token: collectorToken } : null} onOpenSettings={openSettings} onOpenRecord={openRecord} onDownloadRecord={(record) => downloadRecord(record, true)} onSendToReelLab={reelLabReady ? (record) => sendRecordToReelLab(record, true) : undefined} downloadStates={downloadStates} sendStates={sendStates} onBatchDownloadActiveChange={setBatchDownloadActive} />}
+          explore={<ExploreWorkspace connection={collectorToken ? { baseUrl: collectorUrl, token: collectorToken } : null} accountId={collectorStatus?.account?.id ?? null} onOpenSettings={openSettings} onOpenRecord={openRecord} onDownloadRecord={(record) => downloadRecord(record, true)} downloadStates={downloadStates} onBatchDownloadActiveChange={setBatchDownloadActive} />}
           creator={<CreatorWorkspace connection={collectorToken ? { baseUrl: collectorUrl, token: collectorToken } : null} onOpenSettings={openSettings} onOpenRecord={openRecord} />}
           assistant={assistantInstalled ? <AssistantWorkspace connection={collectorToken ? { baseUrl: collectorUrl, token: collectorToken } : null} view={assistantView}
+            videoLibrary={!privacy && !switchingAccount && collectorAccounts?.activeId ? { accountId: collectorAccounts.activeId, records: workspaceRecords } : undefined}
             onOpenSettings={() => openPreferences("ai")} onOpenLink={(url) => void openRecord(url)} onSaveDownload={saveAssistantDownload} /> : undefined}
-          onSendToReelLab={reelLabReady ? (record) => void sendRecordToReelLab(record) : undefined}
-          activeView={dashboardView}
+          activeView={activeView === "sources" ? "sources" : dashboardView}
           appStyle={appStyle}
           storyStyle={storyStyle}
           onOpenPreferences={openPreferences}
@@ -2085,7 +2053,7 @@ function AppContent() {
             if (!collectorToken) { openSettings(); return; }
             void collectChatHistory(collectorUrl, collectorToken);
           }}
-          onChangeView={setDashboardView}
+          onChangeView={changeDashboardView}
           onDownloadRecord={downloadRecord}
           onBatchDownloadActiveChange={setBatchDownloadActive}
           onLoadVideo={loadRecordVideo}
@@ -2099,7 +2067,6 @@ function AppContent() {
           records={workspaceRecords}
           liveRecords={recordsFrozen && displaySnapshot?.source === "collector" ? liveRecords : null}
           downloadStates={downloadStates}
-          sendStates={sendStates}
           report={personalSummary ?? livingReport}
           sourceLabel={sourceLabel}
           status={collectorStatus}
@@ -2185,6 +2152,9 @@ function AppContent() {
           connection={collectorToken ? { baseUrl: collectorUrl, token: collectorToken } : null} view={assistantView}
           onOpenSettings={() => openPreferences("ai")} onOpenLink={(url) => void openRecord(url)} onSaveDownload={saveAssistantDownload} />}
       {exportSnapshot ? <DataExportDialog snapshot={exportSnapshot} onClose={closeDataExport} onExport={exportSelectedData} progress={exportProgress} /> : null}
+      {exportToast ? <View pointerEvents="none" style={styles.toastLayer}>
+        <Text accessibilityLiveRegion="polite" role="status" style={styles.toast}>{exportToast}</Text>
+      </View> : null}
       {downloadChoice ? <SingleDownloadDialog title={privacy ? undefined : downloadChoice.record.title} onClose={() => setDownloadChoice(null)}
         onDownload={options => {
           setDownloadChoice(null);
@@ -2207,4 +2177,6 @@ export default function App() {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: workspaceColors.canvas },
+  toastLayer: { position: "absolute", left: 16, right: 16, bottom: 32, alignItems: "center" },
+  toast: { maxWidth: 420, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: "rgba(0,0,0,0.8)", color: "#fff", fontSize: 13, textAlign: "center" },
 });

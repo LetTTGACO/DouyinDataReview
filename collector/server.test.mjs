@@ -50,6 +50,27 @@ async function startPaired(prefix, prepare) {
 }
 
 describe("collector accounts", () => {
+  it("seeks the analyzed account's cached original with a playback key when there is no online login", async () => {
+    const { runtime, headers } = await startPaired("analysis-replay-", async root => {
+      const dir = path.join(root, "video-analysis", "12345678");
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, "source.mp4"), "0123456789");
+    });
+    const jobs = runtime.baseUrl + "/v1/downloads";
+    const { job } = await fetch(jobs, { method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://www.douyin.com/video/12345678", playback: true }) }).then(r => r.json());
+    await vi.waitFor(async () => {
+      const view = await fetch(jobs + "/" + job.id, { headers }).then(r => r.json());
+      expect(view.job.status).toBe("complete");
+    });
+    const url = jobs + "/" + job.id + "/stream?key=";
+    expect((await fetch(url + "wrong")).status).toBe(404);
+    const part = await fetch(url + job.streamKey, { headers: { Range: "bytes=3-6" } });
+    expect(part.status).toBe(206);
+    expect(part.headers.get("Content-Range")).toBe("bytes 3-6/10");
+    expect(await part.text()).toBe("3456");
+    expect((await fetch(url + job.streamKey, { headers: { Range: "bytes=100-" } })).status).toBe(416);
+  });
   it("scopes voice transcription to the expected account and forwards only the requested local message", async () => {
     const transcribe = vi.spyOn(DouyinCollector.prototype, "transcribeChatVoice").mockResolvedValue({ id: "123", text: "合成转写" });
     try {
@@ -151,7 +172,9 @@ describe("collector accounts", () => {
       await mkdir(path.join(directory, "x"), { recursive: true });
       await writeFile(path.join(directory, "x", "keep.txt"), "keep");
     });
-    const listing = (await readdir(dataDirectory)).sort();
+    // mcp-token 是启动后才异步写的，可能落在前后两次读目录之间，和账号路由无关
+    const entries = async () => (await readdir(dataDirectory)).filter(name => name !== "mcp-token").sort();
+    const listing = await entries();
     const registry = await readFile(path.join(dataDirectory, "accounts.json"), "utf8");
     for (const [pathname, method] of [
       ["/v1/accounts/..%2Fx", "DELETE"],
@@ -168,7 +191,7 @@ describe("collector accounts", () => {
     for (const pathname of ["/v1/accounts/../x", "/v1/accounts/%2E%2E", "/v1/accounts/%2e%2e/activate"]) {
       expect((await fetch(`${runtime.baseUrl}${pathname}`, { method: "DELETE", headers })).status, pathname).toBe(404);
     }
-    expect((await readdir(dataDirectory)).sort()).toEqual(listing);
+    expect(await entries()).toEqual(listing);
     expect(await readFile(path.join(dataDirectory, "x", "keep.txt"), "utf8")).toBe("keep");
     expect(await readFile(path.join(dataDirectory, "accounts.json"), "utf8")).toBe(registry);
   });
@@ -202,8 +225,11 @@ describe("collector accounts", () => {
     let finishRun;
     const runSync = vi.spyOn(DouyinCollector.prototype, "runDirectRecords").mockImplementation(() => new Promise((resolve) => { finishRun = resolve; }));
     try {
-      const { call } = await startPaired("accounts-busy-");
-      expect((await call("/v1/sync", "POST")).status).toBe(202);
+      const { call, runtime, headers } = await startPaired("accounts-busy-");
+      // 请求体里的 types 交给采集器：只读喜欢
+      const started = await fetch(`${runtime.baseUrl}/v1/sync`, { method: "POST", headers, body: JSON.stringify({ types: ["liked_videos"] }) });
+      expect(started.status).toBe(202);
+      expect(runSync).toHaveBeenCalledWith(expect.any(Number), { full: true, types: ["liked_videos"] });
       const refused = await call("/v1/accounts", "POST");
       expect(refused.status).toBe(409);
       expect(refused.body).toMatchObject({ error: "collector_busy", message: expect.stringContaining("读取") });
@@ -603,8 +629,6 @@ describe("collector server runtime", () => {
     const release = await fetch(releaseUrl, { method: "DELETE", headers: { Authorization: `Bearer ${payload.token}` } });
     expect(release.status).toBe(200);
     await expect(release.json()).resolves.toEqual({ ok: true });
-    // 送去拆片工坊只拿下好了的文件，没有这个任务就是 null
-    expect(runtime.getDownloadFilePath("12345678-1234-1234-1234-123456789abc")).toBeNull();
 
     // <video> sends no session header: a stream is gated by its per-job key alone.
     const stream = await fetch(`${releaseUrl}/stream?key=guess`);

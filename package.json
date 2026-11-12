@@ -1,6 +1,6 @@
 {
   "name": "douyin-content-insights-mobile",
-  "version": "1.43.0",
+  "version": "1.47.1",
   "private": true,
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
@@ -24,12 +24,15 @@
     "prebuild:web": "npm run build:icons && npm run sync:story",
     "build:web": "expo export --platform web",
     "desktop": "npm run build:web && electron desktop/main.mjs",
-    "desktop:pack": "npm run build:web && npm run direct:setup && electron-builder --win dir --publish never",
-    "desktop:build": "npm run build:web && npm run direct:setup && electron-builder --win nsis --publish never",
+    "build:media-tools": "bash scripts/build-media-tools.sh",
+    "stage:media-tools": "node scripts/stage-media-tools.mjs",
+    "desktop:pack": "npm run build:web && npm run direct:setup && npm run build:media-tools && npm run stage:media-tools && electron-builder --win dir --publish never",
+    "desktop:build": "npm run build:web && npm run direct:setup && npm run build:media-tools && npm run stage:media-tools && electron-builder --win nsis --publish never",
     "sync:story": "node scripts/sync-story.mjs",
     "sync:geo": "node scripts/sync-geo.mjs",
     "check:geo": "node scripts/sync-geo.mjs --check",
-    "desktop:build:mac": "npm run build:web && npm run direct:setup && electron-builder --mac --publish never",
+    "desktop:build:mac": "npm run build:web && npm run direct:setup && npm run build:media-tools && npm run stage:media-tools && electron-builder --mac --publish never",
+    "desktop:build:linux": "npm run build:web && npm run direct:setup && npm run build:media-tools && npm run stage:media-tools && electron-builder --linux --publish never",
     "test:ops": "vitest run scripts/ops/github-traffic.test.mjs"
   },
   "dependencies": {
@@ -68,7 +71,10 @@
     "appId": "com.zhangyukwiver.contentinsights",
     "productName": "DouyinDataReview",
     "extraMetadata": {
-      "main": "desktop/main.mjs"
+      "main": "desktop/main.mjs",
+      "desktopName": "DouyinDataReview.desktop",
+      "license": "MIT",
+      "homepage": "https://zhangyukwiver.github.io/DouyinDataReview/"
     },
     "directories": {
       "output": "release"
@@ -115,6 +121,17 @@
         "filter": [
           "LICENSE",
           "lib/runtime/bdms/**"
+        ]
+      },
+      {
+        "from": "build/media-tools",
+        "to": "media-tools",
+        "filter": [
+          "LICENSES.txt",
+          "**/ffmpeg",
+          "**/ffmpeg.exe",
+          "**/ffprobe",
+          "**/ffprobe.exe"
         ]
       }
     ],
@@ -172,6 +189,31 @@
       ],
       "icon": "build/icon.icns",
       "artifactName": "DouyinDataReview-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "executableName": "DouyinDataReview",
+      "category": "Utility",
+      "synopsis": "抖音数据导出与年度报告工作台",
+      "description": "把本人抖音账号的观看历史、喜欢、收藏和好友聊天记录保存到自己的电脑上，并在本机生成年度报告。",
+      "maintainer": "ZhangYukwiver <144537130+ZhangYukwiver@users.noreply.github.com>",
+      "artifactName": "DouyinDataReview-${version}-${arch}.${ext}"
+    },
+    "deb": {
+      "packageName": "douyin-data-review"
     }
   }
 }

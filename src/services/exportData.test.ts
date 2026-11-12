@@ -34,6 +34,23 @@ describe("selected data export", () => {
     expect(parseExportedSnapshot(data)?.chatMessages[0]?.text).toBe("private message");
     expect(data.chatConversations).toEqual(snapshot.chatConversations);
   });
+  it("tags filed records with their folder name and lists every folder of the exported parts", () => {
+    const folders = {
+      watch_history: { folders: [{ id: "w", name: "看过的教程" }], items: { "watch-1": "w" } },
+      liked_videos: { folders: [{ id: "l", name: "不导出" }], items: { "like-1": "l" } },
+      // 按 videoId 归档；指向已删文件夹的旧归档不算；空文件夹也列出来
+      favorite_videos: { folders: [{ id: "a", name: "菜谱" }, { id: "b", name: "空的" }], items: { "7600000000000000001": "a", "favorite-1": "gone" } },
+    };
+    const favorites = [{ ...snapshot.records.favorite_videos[0]!, id: "favorite_videos:1", videoId: "7600000000000000001" }, snapshot.records.favorite_videos[0]!];
+    const data = buildDataExport({ ...snapshot, records: { ...snapshot.records, favorite_videos: favorites } },
+      { ...none, watch_history: true, favorite_videos: true }, { folders });
+    expect(data.records.watch_history[0]).toMatchObject({ id: "watch-1", folder: "看过的教程" });
+    expect(data.records.favorite_videos.map(record => "folder" in record ? record.folder : null)).toEqual(["菜谱", null]);
+    expect(data.folders).toEqual({ watch_history: ["看过的教程"], favorite_videos: ["菜谱", "空的"] });
+    // 导出文件照样能导回来；没给文件夹时不多出 folders 字段
+    expect(parseExportedSnapshot(data)?.records.favorite_videos).toHaveLength(2);
+    expect(buildDataExport(snapshot, { ...none, liked_videos: true })).not.toHaveProperty("folders");
+  });
   it("rejects an empty selection", () => {
     expect(() => buildDataExport(snapshot, none)).toThrow("至少选择");
   });
@@ -49,12 +66,48 @@ describe("selected data export", () => {
     data.groupChatStorage!.conversationIds = [];
     expect(buildDataExport(data, { ...none, chat: true }).chatMessages.map(item => item.id)).not.toContain("group-message");
   });
+  it("applies the time range and group allowlist together", () => {
+    const message = snapshot.chatMessages[0]!;
+    const data: CollectorSnapshot = { ...snapshot,
+      chatMessages: [
+        { ...message, id: "allowed", conversationId: "101", conversationType: "group", sentAt: "2026-10-15T00:00:00Z" },
+        { ...message, id: "old", conversationId: "101", conversationType: "group", sentAt: "2026-10-01T00:00:00Z" },
+        { ...message, id: "blocked", conversationId: "202", conversationType: "group", sentAt: "2026-10-15T00:00:00Z" },
+      ],
+      chatConversations: [
+        { id: "101", kind: "group", name: "已允许", messageCount: 2, ownMessageCount: 0 },
+        { id: "202", kind: "group", name: "未允许", messageCount: 1, ownMessageCount: 0 },
+      ],
+      groupChatStorage: { conversationIds: ["101"] },
+    };
+    const exported = buildDataExport(data, { ...none, chat: true }, { since: "2026-10-10T00:00:00Z" });
+    expect(exported.chatMessages.map(item => item.id)).toEqual(["allowed"]);
+  });
   it.each(["liked_videos", "favorite_videos"] as const)("exports only the selected video category %s", part => {
     const data = buildDataExport(snapshot, { ...none, [part]: true });
     expect(data.records[part]).toEqual(snapshot.records[part]);
     expect(data.records.watch_history).toEqual([]);
     expect(data.chatMessages).toEqual([]);
     expect(parseExportedSnapshot(data)?.records[part]).toHaveLength(1);
+  });
+  it("keeps only watch history and chat from the chosen time on, but likes and favorites in full", () => {
+    const dated: CollectorSnapshot = { ...snapshot, records: { ...snapshot.records, watch_history: [
+      { ...snapshot.records.watch_history[0]!, id: "new", occurredAt: "2026-10-10T00:00:00.000Z" },
+      { ...snapshot.records.watch_history[0]!, id: "old", occurredAt: "2026-09-01T00:00:00Z" },
+      { ...snapshot.records.watch_history[0]!, id: "undated", occurredAt: null },
+    ] }, chatMessages: [
+      { ...snapshot.chatMessages[0]!, id: "late", sentAt: "2026-10-14T09:00:00+08:00" },
+      { ...snapshot.chatMessages[0]!, id: "early", sentAt: "2026-10-09T23:59:59Z" },
+    ] };
+    const all = { watch_history: true, liked_videos: true, favorite_videos: true, chat: true };
+    const data = buildDataExport(dated, all, { since: "2026-10-10T00:00:00Z" });
+    expect(data.records.watch_history.map(record => record.id)).toEqual(["new"]);
+    expect(data.chatMessages.map(message => message.id)).toEqual(["late"]);
+    expect(data.records.liked_videos).toHaveLength(1);
+    expect(data.records.favorite_videos).toHaveLength(1);
+    expect(data.since).toBe("2026-10-10T00:00:00Z");
+    expect(parseExportedSnapshot(data)?.records.watch_history).toHaveLength(1);
+    expect(buildDataExport(dated, all).records.watch_history).toHaveLength(3);
   });
 });
 

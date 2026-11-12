@@ -14,6 +14,8 @@ const MAX_EVENTS = 500;
 // 内容库「推荐流挡掉的」那一栏：每个作品留最近一次，一条约 1KB
 const MAX_VIDEOS = 1000;
 const VIDEO_ACTIONS = new Set(["observed", "hidden", "disliked", "dislike_failed"]);
+// 每个词最多记 300 条，够翻 30 页；搜到底的词会清零重来
+const MAX_PICK_IDS = 300;
 
 const DEFAULT_RULES = ["# 一行一条。词条 / desc:文案词 / author:昵称或数字号 / tag:话题或分类 / /正则/i / 词条@权重", "# 示例，换成你自己的", "营销号", "带货"].join("\n");
 
@@ -24,7 +26,9 @@ function sanitizeEvent(value) {
   const id = typeof value.id === "string" && /^\d{5,30}$/u.test(value.id) ? value.id : "";
   if (!id && value.action !== "unreadable") return null;
   const t = Number.isFinite(value.t) && value.t > 0 ? Math.round(value.t) : Date.now();
-  return { t, id, desc: text(value.desc, 120), author: text(value.author, 40), matched: sanitizeMatched(value.matched), action: value.action };
+  // B 站首页的处置记录带 site，id 是 aid；不带的都是抖音
+  return { t, id, desc: text(value.desc, 120), author: text(value.author, 40), matched: sanitizeMatched(value.matched), action: value.action,
+    ...(value.site === "bilibili" ? { site: "bilibili" } : {}) };
 }
 
 const sanitizeMatched = (value) => (Array.isArray(value) ? value : []).filter((item) => typeof item === "string").slice(0, 5).map((item) => item.slice(0, 60));
@@ -46,6 +50,12 @@ function videoFromEvent(event) {
   return sanitizeVideo({ ...record, occurredAt: new Date(at).toISOString(), occurredAtSource: "platform_action", feedFilter: { action: event.action, matched: event.matched } });
 }
 
+// 每个想看的词条翻到第几条、推过哪些，下次打开接着往后，不重复推
+const sanitizePickHistory = (value) => Object.fromEntries(Object.entries(value && typeof value === "object" ? value : {}).slice(0, 20).map(([word, entry]) => [word.slice(0, 30), {
+  offset: Number.isSafeInteger(entry?.offset) && entry.offset >= 0 ? entry.offset : 0,
+  ids: (Array.isArray(entry?.ids) ? entry.ids : []).filter((id) => typeof id === "string" && /^\d{5,30}$/u.test(id)).slice(-MAX_PICK_IDS),
+}]));
+
 // 磁盘上的文件和请求体都不可信，逐项过一遍
 export function sanitizeFeedFilter(value) {
   const rules = typeof value?.rules === "string" ? value.rules.slice(0, MAX_RULES_CHARACTERS) : DEFAULT_RULES;
@@ -60,7 +70,7 @@ export function sanitizeFeedFilter(value) {
   const webPicks = value?.webPicks === true;
   // 每几条推荐插一条词条视频，软件和网页共用；0 是只看词条
   const pickEvery = Number.isInteger(value?.pickEvery) && value.pickEvery >= 0 && value.pickEvery <= 10 ? value.pickEvery : 3;
-  return { rules, mode, words, webPicks, pickEvery, events, videos, lastSeenAt, remove };
+  return { rules, mode, words, webPicks, pickEvery, events, videos, lastSeenAt, remove, pickHistory: sanitizePickHistory(value?.pickHistory) };
 }
 
 export class FeedFilterStore {
@@ -121,6 +131,10 @@ export class FeedFilterStore {
   setSettings({ rules, mode, words, webPicks, pickEvery }) {
     return this.update((current) => ({ ...current, ...(typeof rules === "string" ? { rules } : {}), ...(FEED_FILTER_MODES.includes(mode) ? { mode } : {}),
       ...(typeof words === "string" ? { words } : {}), ...(typeof webPicks === "boolean" ? { webPicks } : {}), ...(pickEvery !== undefined ? { pickEvery } : {}) }));
+  }
+
+  setPickHistory(pickHistory) {
+    return this.update((current) => ({ ...current, pickHistory }));
   }
 
   // 处置记录照旧只留文字；带着视频信息的另外存成记录，同一个作品只留最近一次

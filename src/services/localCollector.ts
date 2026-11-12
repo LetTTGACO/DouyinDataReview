@@ -1253,8 +1253,9 @@ export async function loadCollectorVideo(
   }
 }
 
-export async function startCollectorSync(baseUrl: string, token: string): Promise<CollectorStatus> {
-  const value = await requestJson(baseUrl, "/v1/sync", { method: "POST" }, token);
+/** types：只读其中几类（只读观看历史、只读喜欢…），不给就三类都读 */
+export async function startCollectorSync(baseUrl: string, token: string, types?: readonly PersonalRecordType[]): Promise<CollectorStatus> {
+  const value = await requestJson(baseUrl, "/v1/sync", { method: "POST", ...(types ? { body: JSON.stringify({ types }) } : {}) }, token);
   if (!isObject(value)) throw new LocalCollectorError("invalid_response", "采集服务未返回同步状态。");
   return parseStatus(value.status);
 }
@@ -1265,8 +1266,8 @@ export async function stopCollectorSync(baseUrl: string, token: string): Promise
   return parseStatus(value.status);
 }
 
-export async function startDirectRecordsSync(baseUrl: string, token: string): Promise<CollectorStatus> {
-  const value = await requestJson(baseUrl, "/v1/experimental/records-direct", { method: "POST" }, token);
+export async function startDirectRecordsSync(baseUrl: string, token: string, types?: readonly PersonalRecordType[]): Promise<CollectorStatus> {
+  const value = await requestJson(baseUrl, "/v1/experimental/records-direct", { method: "POST", ...(types ? { body: JSON.stringify({ types }) } : {}) }, token);
   if (!isObject(value)) throw new LocalCollectorError("invalid_response", "采集服务未返回直接读取状态。");
   return parseStatus(value.status);
 }
@@ -1321,6 +1322,7 @@ export interface FeedFilterEvent {
   author: string;
   matched: string[];
   action: "inserted" | "observed" | "hidden" | "disliked" | "dislike_failed" | "unreadable";
+  site?: "bilibili";
 }
 const FEED_FILTER_MODES: readonly string[] = ["off", "observe", "hide", "dislike"];
 const FEED_FILTER_ACTIONS: readonly string[] = ["inserted", "observed", "hidden", "disliked", "dislike_failed", "unreadable"];
@@ -1406,7 +1408,8 @@ export async function collectorFeedFilterEvents(baseUrl: string, token: string, 
   if (!isObject(value) || !Array.isArray(value.events)) throw new LocalCollectorError("invalid_response", "采集服务没返回处置记录。");
   return value.events.flatMap((item): FeedFilterEvent[] => isObject(item) && FEED_FILTER_ACTIONS.includes(String(item.action)) && typeof item.t === "number"
     ? [{ t: item.t, id: String(item.id ?? ""), desc: String(item.desc ?? ""), author: String(item.author ?? ""),
-      matched: Array.isArray(item.matched) ? item.matched.map(String) : [], action: item.action as FeedFilterEvent["action"] }]
+      matched: Array.isArray(item.matched) ? item.matched.map(String) : [], action: item.action as FeedFilterEvent["action"],
+      ...(item.site === "bilibili" ? { site: "bilibili" as const } : {}) }]
     : []);
 }
 

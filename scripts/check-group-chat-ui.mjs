@@ -52,7 +52,6 @@ try {
   await page.getByRole("textbox", { name: "采集服务地址", exact: true }).fill(runtime.baseUrl);
   await page.getByRole("button", { name: "连接采集器", exact: true }).click();
   await page.getByRole("button", { name: "关闭设置", exact: true }).click();
-  await page.getByRole("button", { name: "进入工作台", exact: true }).click();
   await page.getByRole("tab", { name: /^聊天/ }).click();
   await page.locator('[data-testid="chat-conversation-101"]').click();
   const older = page.locator('[data-testid="chat-local-older"]');
@@ -73,7 +72,8 @@ try {
   await page.locator('[data-testid="chat-conversation-202"]').click();
   await page.locator('[data-testid="chat-detail-pane"]').getByText("待授权的群消息", { exact: true }).waitFor();
   const readsBeforeChange = remoteReads, initializationsBeforeChange = initializations;
-  await page.getByRole("button", { name: "打开设置", exact: true }).click();
+  await page.getByTestId("workspace-account").click();
+  await page.getByRole("menuitem", { name: "设置", exact: true }).click();
   await page.locator('[data-testid="settings-tab-privacy"]').click();
   const saved = page.waitForResponse(result => new URL(result.url()).pathname === "/v1/settings/group-chat-storage" && result.request().method() === "POST");
   await page.locator('[data-testid="settings-group-202"]').click();
@@ -90,7 +90,8 @@ try {
   // Pause before changing the setting: the UI must refresh without reception polling.
   await page.getByRole("button", { name: "暂停接收", exact: true }).click();
   await page.getByRole("button", { name: "开始接收", exact: true }).waitFor();
-  await page.getByRole("button", { name: "打开设置", exact: true }).click();
+  await page.getByTestId("workspace-account").click();
+  await page.getByRole("menuitem", { name: "设置", exact: true }).click();
   await page.locator('[data-testid="settings-tab-privacy"]').click();
   const toggle = page.locator('[data-testid="settings-group-202"]');
   let settingsPosts = 0;

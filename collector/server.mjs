@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 import { AccountRegistry, isAccountId } from "./accounts.mjs";
 import { AssistantError } from "./assistant/chat.mjs";
 import { createAssistant } from "./assistant/index.mjs";
+import { createLocalAi } from "./localAi.mjs";
+import { VideoAnalysis } from "./videoAnalysis.mjs";
 import { DouyinCollector } from "./douyinCollector.mjs";
 import { BrowserConnectionError, browserDirectories, connectExternalBrowser, listBrowserSources, openBrowserPage } from "./browserConnection.mjs";
 import { DesktopClientError, desktopDataDirectory, readDesktopIdentity, readDesktopSession } from "./desktopClient.mjs";
@@ -26,6 +28,7 @@ import { LiveRoomError } from "./liveRoom.mjs";
 import { CollectorStore } from "./store.mjs";
 import { parseGroupConversationIds } from "./groupChatStorage.mjs";
 import { RecordFolderStore } from "./recordFolders.mjs";
+import { mergeDouyinFolders, pushDouyinFolders } from "./douyinFolders.mjs";
 import { FEED_FILTER_MODES, FEED_FILTER_ORIGINS, FeedFilterStore } from "./feedFilter.mjs";
 import { fetchMediaStream } from "./videoDownloader.mjs";
 import downloadQualities from "./downloadQualities.json" with { type: "json" };
@@ -189,7 +192,7 @@ function sendJson(response, statusCode, payload) {
   response.end(body);
 }
 
-async function sendVideoFile(response, filePath, fileName) {
+async function sendVideoFile(response, filePath, fileName, playbackRequest = null) {
   let file;
   try {
     file = await stat(filePath);
@@ -204,13 +207,27 @@ async function sendVideoFile(response, filePath, fileName) {
   const safeName = String(fileName || "douyin-video.mp4")
     .replace(/[<>:"/\\|?*\u0000-\u001F]/gu, "_")
     .slice(0, 180) || "douyin-video.mp4";
-  response.writeHead(200, {
+  const range = playbackRequest?.headers.range;
+  let start = 0, end = file.size - 1;
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/u.exec(range);
+    if (match?.[1]) {
+      start = Number(match[1]);
+      if (match[2]) end = Math.min(end, Number(match[2]));
+    } else if (match?.[2]) start = Math.max(0, file.size - Number(match[2]));
+    if (!match || (!match[1] && !match[2]) || start > end) {
+      response.writeHead(416, { "Content-Range": `bytes */${file.size}` }); response.end(); return;
+    }
+  }
+  response.writeHead(range ? 206 : 200, {
     "Content-Type": ({ ".zip": "application/zip", ".m4a": "audio/mp4" })[path.extname(safeName)] ?? "video/mp4",
-    "Content-Length": file.size,
-    "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+    "Content-Length": end - start + 1,
+    ...(playbackRequest ? { "Accept-Ranges": "bytes" } : { "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(safeName)}` }),
+    ...(range ? { "Content-Range": `bytes ${start}-${end}/${file.size}` } : {}),
     "Cache-Control": "no-store",
   });
-  const stream = createReadStream(filePath);
+  const stream = createReadStream(filePath, range ? { start, end } : {});
+  response.once("close", () => stream.destroy());
   stream.once("error", () => response.destroy());
   stream.pipe(response);
 }
@@ -288,6 +305,7 @@ export async function startCollectorServer({
   let writesEnabled = await readFile(writeSettingsFile, "utf8").then((text) => JSON.parse(text).enabled === true).catch(() => false);
   // 推荐流控制：词条、过滤方式和处置记录所有账号共用；浏览器里由扩展照着做
   const feedFilter = new FeedFilterStore(dataDirectory);
+  const localAi = createLocalAi({ dataDirectory });
   // 每个账号一个采集器，各用自己目录里的登录态和记录；同一时间只开当前这一个
   const openCollector = async (account) => {
     const directory = accounts.directory(account);
@@ -300,6 +318,17 @@ export async function startCollectorServer({
       onAccountIdentity: (identity) => accounts.updateIdentity(account.id, identity).catch(() => undefined),
     });
     await next.initialize();
+    // 读取时读到的抖音收藏夹并进收藏栏的文件夹；没变就不写，免得打断正在整理的页面
+    next.onDouyinFolders = async (remote) => {
+      let changed = false;
+      const saved = await foldersOf(next).update(({ lists }) => {
+        const merged = mergeDouyinFolders(lists.favorite_videos, remote);
+        changed = JSON.stringify(merged) !== JSON.stringify(lists.favorite_videos);
+        return changed ? { ...lists, favorite_videos: merged } : lists;
+      });
+      if (changed) assistant.foldersChanged(saved.revision);
+    };
+    next.videoAnalysis = new VideoAnalysis({ directory, localAi, download: (id, signal) => next.downloadVideoForAnalysis(id, signal) });
     return next;
   };
   let collector = await openCollector(accounts.active());
@@ -367,6 +396,7 @@ export async function startCollectorServer({
   // AI 助手：数据在进程里查，功能调自己的接口（server 在下面建好、监听后才会被用到）
   const assistant = createAssistant({
     dataDirectory,
+    localAi,
     baseUrl: () => `http://127.0.0.1:${server.address().port}`,
     pairing,
     collector: () => collector,
@@ -528,7 +558,8 @@ export async function startCollectorServer({
     const streamMatch = request.method === "GET" ? url.pathname.match(/^\/v1\/downloads\/([0-9a-f-]{20,})\/stream$/iu) : null;
     if (streamMatch) {
       const stream = collector.playbackStream(streamMatch[1], url.searchParams.get("key"), url.searchParams.get("live"));
-      if (stream) await proxyMediaStream(request, response, stream);
+      if (stream?.cachedFile) await sendVideoFile(response, stream.cachedFile, "source.mp4", request);
+      else if (stream) await proxyMediaStream(request, response, stream);
       else sendJson(response, 404, { error: "download_job_not_found" });
       return;
     }
@@ -845,14 +876,19 @@ export async function startCollectorServer({
         } else {
           // 刷视频插词条的频率和屏蔽词条都在设置里改，这里每批现读
           if (operation === "read" && body?.kind === "feed") {
-            const { pickEvery, rules, mode } = await feedFilter.read();
-            Object.assign(body, { pickEvery, rules, mode });
+            const { pickEvery, rules, mode, pickHistory } = await feedFilter.read();
+            Object.assign(body, { pickEvery, rules, mode, pickHistory });
           }
           const result = await explorer.run(body, operation, controller.signal);
           if (result?.filtered) {
             const { filtered } = result;
             delete result.filtered;
             await feedFilter.addEvents(filtered).catch(() => {}); // 记不上不耽误刷视频
+          }
+          if (result?.pickHistory) {
+            const { pickHistory } = result;
+            delete result.pickHistory;
+            await feedFilter.setPickHistory(pickHistory).catch(() => {}); // 存不上只是下次可能重复
           }
           if (operation === "video") {
             response.once("close", () => void result.dispose());
@@ -866,6 +902,42 @@ export async function startCollectorServer({
           message: error?.code ? error.message : "页面读取失败，请检查抖音浏览器后重试。",
         });
       } finally { response.off("close", abort); }
+    } else if (url.pathname === "/v1/video-analysis/notes") {
+      if (rejectWhileSwitching(response) || rejectStaleAccount(response, url)) return;
+      try {
+        collector.assertReadPermission("videos");
+        if (request.method !== "GET") {
+          sendJson(response, 405, { error: "method_not_allowed" });
+          return;
+        }
+        const history = await collector.videoAnalysis.listNotes();
+        if (rejectWhileSwitching(response) || rejectStaleAccount(response, url)) return;
+        sendJson(response, 200, history);
+      } catch (error) {
+        sendJson(response, error.status || 500, { error: error.code || "analysis_error", message: error.status ? error.message : "无法读取视频笔记。" });
+      }
+    } else if (url.pathname.startsWith("/v1/video-analysis/")) {
+      const id = url.pathname.slice("/v1/video-analysis/".length);
+      const target = collector;
+      if (rejectStaleAccount(response, url)) return;
+      try {
+        target.assertReadPermission("videos");
+        // /v1/video-analysis/batch 是批量那一队，其余是单条作品
+        const batch = id === "batch";
+        if (request.method === "GET") sendJson(response, 200, batch ? target.videoAnalysis.batchView() : await target.videoAnalysis.view(id));
+        else if (request.method === "DELETE") sendJson(response, 200, batch ? await target.videoAnalysis.cancelBatch() : await target.videoAnalysis.cancel(id));
+        else if (request.method === "POST") {
+          const body = await readJsonBody(request, batch ? 256 * 1024 : 8 * 1024);
+          if (rejectWhileSwitching(response) || rejectStaleAccount(response, url)) return;
+          if (target !== collector) throw Object.assign(new Error("当前账号已切换，请重新打开作品。"), { code: "account_changed", status: 409 });
+          target.assertReadPermission("videos");
+          sendJson(response, 202, batch ? target.videoAnalysis.startBatch(body) : await target.videoAnalysis.start(id, body));
+        } else sendJson(response, 405, { error: "method_not_allowed" });
+      } catch (error) {
+        const invalid = error instanceof SyntaxError || error?.message === "body_too_large";
+        sendJson(response, error.status || (invalid ? 400 : 500), { error: error.code || (invalid ? "invalid_request" : "analysis_error"),
+          message: error.status ? error.message : invalid ? "解析请求格式无效。" : "无法读取视频解析结果。" });
+      }
     } else if (request.method === "POST" && url.pathname === "/v1/downloads") {
       try {
         const body = await readJsonBody(request);
@@ -1159,15 +1231,21 @@ export async function startCollectorServer({
       }
       try {
         // 不回传整份文档：上万条归档时两头各多一次序列化，界面也用不上
-        const { revision } = await foldersOf(target).write(body);
+        // 收藏栏里动到抖音收藏夹的，先改到抖音上再存
+        const { revision } = await foldersOf(target).write(body, async (lists, current) => ({ ...lists,
+          favorite_videos: await pushDouyinFolders(current.favorite_videos, lists.favorite_videos, {
+            checked: body.revision !== undefined, enabled: () => writesEnabled, getApi: () => target.ensureDirectApi({ security: true }) }) }));
         assistant.foldersChanged(revision);
         sendJson(response, 200, { ok: true, revision });
       } catch (error) {
-        if (error?.code === "folders_changed") sendJson(response, 409, { error: error.code, message: error.message });
+        const status = { folders_changed: 409, writes_disabled: 403, invalid_request: 400, login_required: 502, douyin_folders_failed: 502 }[error?.code];
+        if (status) sendJson(response, status, { error: error.code, message: error.message });
         else sendJson(response, 500, { error: "folders_save_failed", message: "文件夹没存上，请稍后再试。" });
       }
     } else if (request.method === "POST" && url.pathname === "/v1/sync") {
-      const started = collector.startSync();
+      // 请求体 { types: [...] } 只读其中几类；读不出请求体就照旧三类都读
+      const body = await readJsonBody(request).catch(() => null);
+      const started = collector.startSync({ types: body?.types });
       sendJson(response, started ? 202 : 200, { started, status: collector.getStatus() });
     } else if (request.method === "POST" && url.pathname === "/v1/sync/stop") {
       const stopped = collector.stopSync();
@@ -1177,7 +1255,8 @@ export async function startCollectorServer({
         sendJson(response, 403, { error: "loopback_only" });
         return;
       }
-      const started = collector.startDirectRecords();
+      const body = await readJsonBody(request).catch(() => null);
+      const started = collector.startDirectRecords({ types: body?.types });
       sendJson(response, started ? 202 : 200, { started, status: collector.getStatus() });
     } else if (request.method === "POST" && url.pathname === "/v1/chat/observe") {
       const started = collector.startChatObservation();
@@ -1283,6 +1362,7 @@ export async function startCollectorServer({
       await accountWork?.catch(() => undefined);
       await browserWork;
       await clearPendingBrowser();
+      await collector.videoAnalysis.stop();
       await assistant.close();
       await explorer.close();
       await collector.close();
@@ -1306,8 +1386,6 @@ export async function startCollectorServer({
     getPairingCode: () => pairing.displayCode(),
     setAppUsageActive: active => usageSessions.setActive("app", active, { reason: "hidden" }),
     setUsageSuspended: suspended => usageSessions.setSuspended(suspended),
-    // 送去拆片工坊：桌面主进程按下载任务取已下好的文件，没下完或不在下载目录里就是 null
-    getDownloadFilePath: (jobId) => collector.getVideoDownloadFilePath(jobId),
     close: shutdown,
   };
 }

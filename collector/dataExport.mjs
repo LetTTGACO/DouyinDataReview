@@ -2,23 +2,49 @@
 /** @typedef {import("../src/domain/chatRecords").ChatMessage} ChatMessage */
 /** @typedef {import("../src/domain/personalRecords").PersonalRecordType | "chat"} ExportPart */
 
-/** @param {CollectorSnapshot} snapshot @param {Partial<Record<ExportPart, boolean>>} selection */
-export function buildDataExport(snapshot, selection, exportedAt = new Date().toISOString()) {
+/** @typedef {{ folders: Array<{ id: string, name: string }>, items: Record<string, string> }} FolderList */
+
+/**
+ * since：只要这个时间之后的观看历史和聊天消息（ISO 时间）。喜欢、收藏抖音几乎不给时间，照样整份导出
+ * folders：三栏的文件夹（folders.json 的 lists）。放进文件夹的记录带上 folder（文件夹名），顶层 folders 按栏列出全部文件夹名（空的也在）
+ * @param {CollectorSnapshot} snapshot @param {Partial<Record<ExportPart, boolean>>} selection
+ * @param {{ exportedAt?: string, since?: string | null, folders?: Partial<Record<import("../src/domain/personalRecords").PersonalRecordType, FolderList>> | null }} [options]
+ */
+export function buildDataExport(snapshot, selection, { exportedAt = new Date().toISOString(), since = null, folders = null } = {}) {
   const parts = /** @type {ExportPart[]} */ (Object.keys(selection)).filter(part => selection[part]);
   if (!parts.length) throw new Error("请至少选择一部分数据。");
   const allowed = new Set(snapshot.groupChatStorage?.conversationIds ?? []);
   const groups = new Set(snapshot.chatConversations.filter(item => item.kind === "group").map(item => item.id));
   for (const id of snapshot.groupChatStorage?.conversationIds ?? []) groups.add(id);
   const messages = snapshot.chatMessages.filter(message => (message.conversationType !== "group" && !groups.has(message.conversationId)) || allowed.has(message.conversationId));
+  const sinceMs = since ? Date.parse(since) : NaN;
+  // 按时间比，不按字符串比：带不带毫秒、时区写法不同的时间串排不对
+  /** @param {string | null | undefined} at */
+  const inRange = at => Number.isNaN(sinceMs) || (at ? Date.parse(at) >= sinceMs : false);
+  /** @template {{ id: string, videoId?: string | null }} R @param {R[]} records @param {FolderList | undefined} list */
+  const filed = (records, list) => {
+    const names = new Map((list?.folders ?? []).map(folder => [folder.id, folder.name]));
+    if (!names.size || !list) return records;
+    // 和界面一样按视频归档：有 videoId 用它，没有才用记录 id
+    return records.map(record => {
+      const name = names.get(list.items[record.videoId || record.id]);
+      return name ? { ...record, folder: name } : record;
+    });
+  };
+  const folderNames = Object.fromEntries(/** @type {const} */ (["watch_history", "liked_videos", "favorite_videos"])
+    .filter(type => selection[type] && folders?.[type]?.folders.length)
+    .map(type => [type, folders?.[type]?.folders.map(folder => folder.name) ?? []]));
   return {
     schemaVersion: /** @type {const} */ (2), exportedAt, source: "collector", parts, updatedAt: snapshot.updatedAt,
+    ...(since ? { since } : {}),
+    ...(Object.keys(folderNames).length ? { folders: folderNames } : {}),
     records: {
-      watch_history: selection.watch_history ? snapshot.records.watch_history : [],
-      liked_videos: selection.liked_videos ? snapshot.records.liked_videos : [],
-      favorite_videos: selection.favorite_videos ? snapshot.records.favorite_videos : [],
+      watch_history: selection.watch_history ? filed(snapshot.records.watch_history.filter(record => inRange(record.occurredAt)), folders?.watch_history) : [],
+      liked_videos: selection.liked_videos ? filed(snapshot.records.liked_videos, folders?.liked_videos) : [],
+      favorite_videos: selection.favorite_videos ? filed(snapshot.records.favorite_videos, folders?.favorite_videos) : [],
     },
     chatConversations: selection.chat ? snapshot.chatConversations : [],
-    chatMessages: selection.chat ? messages.map(portableMessage) : [],
+    chatMessages: selection.chat ? messages.filter(message => inRange(message.sentAt)).map(portableMessage) : [],
     ...(selection.chat && allowed.size ? { groupChatStorage: { conversationIds: [...allowed] } } : {}),
     warnings: /** @type {string[]} */ ([]),
   };
