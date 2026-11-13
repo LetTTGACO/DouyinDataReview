@@ -62,7 +62,7 @@ describe("read_chat saved attachments", () => {
       const store = new CollectorStore(dir);
       await store.groupChatStorage.save(["101"]);
       await store.save(createEmptyRecords(), [], { chatConversations: [{ id: "101", kind: "group", name: "测试群" }],
-        chatMessages: [message("1", { conversationId: "101", type: "share", share })] });
+        chatMessages: [message("1", { conversationId: "101", senderId: "111", senderName: null, type: "share", share })] });
       server = await startCollectorServer({ port: 0, dataDirectory: dir, browserSources: [], desktopSupported: false });
       await fetch(`${server.baseUrl}/mcp`, { method: "POST", body: "{}" });
       const secret = (await readFile(path.join(dir, "mcp-token"), "utf8")).trim();
@@ -72,7 +72,7 @@ describe("read_chat saved attachments", () => {
       const rpc = await response.json();
       expect(rpc.result.isError).toBe(false);
       const result = JSON.parse(rpc.result.content[0].text);
-      expect(result).toMatchObject({ ok: true, total: 1, items: [{ kind: "share", shared: "群聊视频", share: { ...share, videoId: "7123456789012345678" } }] });
+      expect(result).toMatchObject({ ok: true, total: 1, items: [{ sender: "对方", senderId: "111", kind: "share", shared: "群聊视频", share: { ...share, videoId: "7123456789012345678" } }] });
     } finally {
       await server?.close();
       await rm(dir, { recursive: true, force: true });

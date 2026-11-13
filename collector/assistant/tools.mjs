@@ -406,6 +406,7 @@ export const TOOLS = [
         total: all.length,
         items: picked.map((message) => ({
           id: message.id, time: localTime(message.sentAt), sender: message.senderName ?? "对方",
+          ...(message.senderId ? { senderId: message.senderId } : {}),
           ...(message.text ? { text: message.text } : {}),
           ...(message.type && message.type !== "text" ? { kind: message.type } : {}),
           ...(message.share?.title ? { shared: message.share.title } : {}),
