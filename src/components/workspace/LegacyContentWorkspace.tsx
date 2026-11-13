@@ -22,6 +22,7 @@ import {
   Bookmark,
   ChartColumn,
   Check,
+  Copy,
   Download,
   Eye,
   EyeOff,
@@ -1841,6 +1842,8 @@ const RecordTile = memo(function RecordTile({
 }) {
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tileRef = useRef<View | null>(null);
   const [, inView] = useInView(tileRef);
   const { coverUrl, onError: onCoverError } = useRecordCover(record, coverConnection, coverOwner, inView && !privacy);
@@ -1854,7 +1857,26 @@ const RecordTile = memo(function RecordTile({
     : downloadState === "complete"
       ? "已下载"
       : downloadState === "failed" ? "重试" : "下载";
-  // 卡片上三颗按钮挤一行，字写短（和「跳转」「下载」一样两个字）；读屏说明写全
+  const copyLink = async () => {
+    if (!record.url) return;
+    let copied = false;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(record.url);
+      copied = true;
+    } catch {
+      const previousFocus = document.activeElement as HTMLElement | null;
+      const area = document.createElement("textarea");
+      area.value = record.url;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.append(area);
+      try { area.select(); copied = document.execCommand("copy"); } catch { copied = false; } finally { area.remove(); previousFocus?.focus(); }
+    }
+    setCopyState(copied ? "copied" : "failed");
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCopyState("idle"), 2500);
+  };
   const markFocused = () => setFocused(true);
   const checkFocusBoundary = (event?: unknown) => {
     if (Platform.OS !== "web") {
@@ -1879,6 +1901,7 @@ const RecordTile = memo(function RecordTile({
   };
   useEffect(() => () => {
     if (focusCheckTimer.current) clearTimeout(focusCheckTimer.current);
+    if (copyTimer.current) clearTimeout(copyTimer.current);
   }, []);
   return (
     <View
@@ -2009,7 +2032,19 @@ const RecordTile = memo(function RecordTile({
               {downloading ? <ActivityIndicator color={color.white} size="small" /> : <Download color={color.white} size={14} strokeWidth={2.2} />}
               <Text style={styles.tileActionText}>{downloadLabel}</Text>
             </Pressable>
-            {onAnalyze ? <Pressable
+            {type === "favorite_videos" ? <Pressable
+              testID="record-tile-action"
+              accessibilityLabel={copyState === "copied" ? "链接已复制" : copyState === "failed" ? "复制失败，请重试" : "复制抖音链接"}
+              accessibilityRole="button"
+              onFocus={markFocused}
+              onBlur={checkFocusBoundary}
+              onPress={() => void copyLink()}
+              {...ws("btn-sig w-tileaction")}
+              style={({ pressed }) => [styles.tileAction, pressed && styles.tileActionPressed, webPointer]}
+            >
+              {copyState === "copied" ? <Check color={color.white} size={14} strokeWidth={2.2} /> : <Copy color={color.white} size={14} strokeWidth={2.2} />}
+              <Text style={styles.tileActionText}>{copyState === "copied" ? "已复制" : copyState === "failed" ? "失败" : "复制"}</Text>
+            </Pressable> : onAnalyze ? <Pressable
               testID="record-tile-action"
               accessibilityLabel="解析视频"
               accessibilityRole="button"

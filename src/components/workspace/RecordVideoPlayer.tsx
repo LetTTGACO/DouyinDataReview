@@ -1,12 +1,11 @@
 import React, { memo, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Modal } from "react-native";
-import { ArrowUp, ArrowUpRight, Bookmark, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Forward, Heart, Link, Maximize, MessageCircle, Music2, Pause, Play, Search, Smile, Sparkles, Volume2, VolumeX, X } from "lucide-react-native";
+import { ArrowUp, ArrowUpRight, Bookmark, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Forward, Heart, Link, Maximize, MessageCircle, Music2, Pause, Play, Search, Smile, Volume2, VolumeX, X } from "lucide-react-native";
 import { CHAT_EMOJI, splitChatEmoji } from "../../domain/chatEmoji";
 import type { PersonalVideoRecord } from "../../domain/personalRecords";
 import type { ExploreComment, ExploreConnection, ExploreOutcome, ExplorePage, ExploreSharee, WatchedItem } from "../../services/explorer";
-import { analysisVideoIdOf, buildVideoFeed, createVideoCommentsSession, createVideoShareSession, createVideoWheelGesture, reactVideo, videoIdOf, waitForCollector } from "../../services/videoFeed";
+import { buildVideoFeed, createVideoCommentsSession, createVideoShareSession, createVideoWheelGesture, reactVideo, videoIdOf, waitForCollector } from "../../services/videoFeed";
 import { LocalCollectorError, type PlaybackMedia } from "../../services/localCollector";
-import { VideoAnalysisPanel } from "./VideoAnalysisPanel";
 import type { RecordDownloadState } from "./LegacyContentWorkspace";
 import { PlaybackContext } from "./PlaybackContext";
 import { CommentImagePreview, CommentImageThumbnails } from "./CommentImagePreview";
@@ -17,6 +16,20 @@ export type RecordVideoLoader = (record: PersonalVideoRecord, signal: AbortSigna
 export const count = (value?: number | null) => value == null ? "—" : value >= 10000 ? `${(value / 10000).toFixed(1).replace(/\.0$/u, "")}万` : value.toLocaleString("zh-CN");
 const time = (value: number) => `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, "0")}`;
 const date = (value?: string | null) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleDateString("zh-CN") : "";
+async function copyVideoLink(url: string): Promise<boolean> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+    await navigator.clipboard.writeText(url);
+    return true;
+  } catch {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const area = Object.assign(document.createElement("textarea"), { value: url });
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.append(area);
+    try { area.select(); return document.execCommand("copy"); } catch { return false; } finally { area.remove(); previousFocus?.focus(); }
+  }
+}
 // 评论和文案里的小表情以 [捂脸] 这样的文字代码传输，用聊天页同一份字典换成行内小图，没收录的原样显示。
 export const EmojiText = ({ text }: { text: string }) => <>{splitChatEmoji(text).map((part, index) => "emoji" in part
   ? <img className="rv-emoji" key={index} src={part.url} alt={part.emoji} title={part.emoji} referrerPolicy="no-referrer" draggable={false} />
@@ -50,7 +63,7 @@ const KEEP_BEHIND = 3;
 const DOWNLOAD_LABEL: Record<RecordDownloadState, string> = { idle: "下载", queued: "下载中", running: "下载中", complete: "已下载", failed: "重试" };
 const DOWNLOAD_SPOKEN: Record<RecordDownloadState, string> = { idle: "下载这条视频", queued: "正在下载", running: "正在下载", complete: "已下载，再下载一次", failed: "下载失败，重试" };
 
-export function RecordVideoPlayer({ record, initialTimeMs, records, onLoadVideo, commentsConnection = null, accountId = null, onOpenRecord, onClose, onReachEnd, title = "当前列表", onSeen, feedError = null, onDownload, downloadStates }: Props) {
+export function RecordVideoPlayer({ record, initialTimeMs, records, onLoadVideo, commentsConnection = null, onOpenRecord, onClose, onReachEnd, title = "当前列表", onSeen, feedError = null, onDownload, downloadStates }: Props) {
   const inline = !onClose;
   const initialSeek = useRef(initialTimeMs);
   // Freeze the opened list so background collection cannot reorder a playing feed; a growing feed only appends.
@@ -123,7 +136,7 @@ export function RecordVideoPlayer({ record, initialTimeMs, records, onLoadVideo,
     const gesture = createVideoWheelGesture();
     const wheel = (event: WheelEvent) => {
       if (event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY) ||
-        (event.target as Element).closest("[data-feed-controls],[data-comments-panel],[data-share-panel],[data-analysis-panel]")) return;
+        (event.target as Element).closest("[data-feed-controls],[data-comments-panel],[data-share-panel]")) return;
       event.preventDefault();
       const direction = gesture(event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewer.clientHeight : 1), performance.now());
       if (direction) setIndex((current) => Math.max(0, Math.min(feed.length - 1, current + direction)));
@@ -137,7 +150,7 @@ export function RecordVideoPlayer({ record, initialTimeMs, records, onLoadVideo,
       // 弹窗的 Esc 由 Modal 的 onRequestClose 接；嵌在页面里只能自己接，而且评论和分享面板会拦下冒泡，得在捕获阶段接
       onKeyDownCapture={inline ? (event) => { if (event.key === "Escape" && !(event.target as Element).closest("dialog[open]") && (shareOpen || commentsOpen)) { event.stopPropagation(); dismiss(); } } : undefined}
       onKeyDown={(event) => {
-        if ((event.target as Element).closest("input,a,[data-comments-panel],[data-share-panel],[data-analysis-panel]")) return;
+        if ((event.target as Element).closest("input,a,[data-comments-panel],[data-share-panel]")) return;
         if (["ArrowDown", "PageDown", "ArrowUp", "PageUp"].includes(event.key)) {
           event.preventDefault(); move(["ArrowDown", "PageDown"].includes(event.key) ? 1 : -1);
         }
@@ -149,7 +162,7 @@ export function RecordVideoPlayer({ record, initialTimeMs, records, onLoadVideo,
             suppressClick.current = false;
             const target = event.target as Element;
             if (!event.isPrimary || event.button !== 0 ||
-              (target.closest("button,input,a,[data-feed-controls],[data-comments-panel],[data-share-panel],[data-analysis-panel]") && !target.closest(".rv-play-overlay"))) return;
+              (target.closest("button,input,a,[data-feed-controls],[data-comments-panel],[data-share-panel]") && !target.closest(".rv-play-overlay"))) return;
             swipe.current = { id: event.pointerId, x: event.clientX, y: event.clientY, dragged: false };
           }}
           onPointerMove={(event) => {
@@ -195,7 +208,7 @@ export function RecordVideoPlayer({ record, initialTimeMs, records, onLoadVideo,
           {feed.slice(Math.max(0, index - KEEP_BEHIND), index + 2).map((item, slot) => { const offset = Math.max(0, index - KEEP_BEHIND) + slot - index; return <Playback key={item.id} active={offset === 0} record={item} onLoadVideo={onLoadVideo}
             muted={muted} onToggleMute={() => setMuted((value) => !value)} commentsOpen={commentsOpen} onToggleComments={toggleComments} onOpenRecord={onOpenRecord}
             shareOpen={shareOpen} onToggleShare={toggleShare} prefs={prefs} onPrefs={(patch) => setPrefs((value) => ({ ...value, ...patch }))} onEnded={() => move(1)} onSeen={onSeen ? reportSeen : undefined} onLeave={onSeen ? (watch) => { left.current = watch; } : undefined}
-            commentsConnection={commentsConnection} accountId={accountId} title={title} onClose={onClose}
+            commentsConnection={commentsConnection} title={title} onClose={onClose}
             onLoadedMetadata={item.id === record.id && offset === 0 ? video => {
               if (initialSeek.current !== undefined) {
                 video.currentTime = initialSeek.current / 1000;
@@ -299,9 +312,9 @@ const Caption = ({ text }: { text: string }) => <>{text.split(/(#[^#\s,，。！
   ? <span className="rv-tag" key={i}>{part}</span> : <EmojiText key={i} text={part} />)}</>;
 
 
-function Playback({ active, record, onLoadVideo, muted, onToggleMute, commentsOpen, onToggleComments, shareOpen, onToggleShare, prefs, onPrefs, onEnded, onSeen, onLeave, commentsConnection, accountId, position, title, onClose, onOpenRecord, onDownload, downloadState, onLoadedMetadata }: {
+function Playback({ active, record, onLoadVideo, muted, onToggleMute, commentsOpen, onToggleComments, shareOpen, onToggleShare, prefs, onPrefs, onEnded, onSeen, onLeave, commentsConnection, position, title, onClose, onOpenRecord, onDownload, downloadState, onLoadedMetadata }: {
   active: boolean; record: PersonalVideoRecord; onLoadVideo: RecordVideoLoader; muted: boolean; onToggleMute: () => void;
-  commentsOpen: boolean; onToggleComments: () => void; shareOpen: boolean; onToggleShare: () => void; commentsConnection: ExploreConnection | null; accountId?: string | null;
+  commentsOpen: boolean; onToggleComments: () => void; shareOpen: boolean; onToggleShare: () => void; commentsConnection: ExploreConnection | null;
   prefs: PlayerPrefs; onPrefs: (patch: Partial<PlayerPrefs>) => void; onEnded: () => void; onSeen?: (record: PersonalVideoRecord) => void; onLeave?: (watch: WatchedItem) => void;
   position: string; title: string; onClose?: () => void; onOpenRecord?: (url: string) => Promise<void>;
   onDownload?: () => void; downloadState: RecordDownloadState;
@@ -352,18 +365,7 @@ function Playback({ active, record, onLoadVideo, muted, onToggleMute, commentsOp
   const [marks, setMarks] = useState(initial);
   const [acting, setActing] = useState<"like" | "collect" | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [analysisOpen, setAnalysisOpen] = useState(false);
-  const analysisVideoId = analysisVideoIdOf(record);
-  const canAnalyze = analysisVideoId && !album;
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 3_500); return () => clearTimeout(timer); }, [toast]);
-  useEffect(() => { setAnalysisOpen(false); }, [record.id, accountId, active]);
-  const seekAnalysis = (ms: number) => {
-    const video = videoRef.current;
-    if (!video || !Number.isFinite(ms)) return;
-    video.currentTime = Math.max(0, ms / 1000);
-    setElapsed(video.currentTime);
-    if (video.paused && active) void video.play().catch(() => {});
-  };
   // 点下去立刻变色，后台只发一个请求；没成功就退回原样并说明原因，结果没确认就保持并提醒
   const act = (action: "like" | "collect") => {
     if (!commentsConnection || acting) return;
@@ -486,23 +488,24 @@ function Playback({ active, record, onLoadVideo, muted, onToggleMute, commentsOp
           disabled={!commentsConnection || acting !== null} onClick={() => act("like")}>
           <Heart color={marks.like ? "#fe2c55" : "#fff"} fill={marks.like ? "#fe2c55" : "#fff"} size={30} /><span>{count(tally(record.stats?.diggCount, "like"))}</span>
         </button>
-        <button className={`rv-stat ${commentsOpen ? "rv-selected" : ""}`} aria-label="查看评论" aria-expanded={commentsOpen} onClick={() => { setAnalysisOpen(false); onToggleComments(); }}>
+        <button className={`rv-stat ${commentsOpen ? "rv-selected" : ""}`} aria-label="查看评论" aria-expanded={commentsOpen} onClick={onToggleComments}>
           <MessageCircle color={commentsOpen ? "#ff2c55" : "#fff"} fill={commentsOpen ? "#ff2c55" : "#fff"} size={30} /><span>{count(record.stats?.commentCount)}</span>
         </button>
         <button className={`rv-stat${marks.collect ? " rv-starred" : ""}`} aria-label={marks.collect ? "取消收藏" : "收藏"} aria-pressed={marks.collect === true}
           disabled={!commentsConnection || acting !== null} onClick={() => act("collect")}>
           <Bookmark color={marks.collect ? "#face15" : "#fff"} fill={marks.collect ? "#face15" : "#fff"} size={28} /><span>{count(tally(record.stats?.collectCount, "collect"))}</span>
         </button>
-        <button className="rv-stat" data-share-toggle aria-label="分享给朋友" aria-expanded={shareOpen} onClick={() => { setAnalysisOpen(false); onToggleShare(); }}>
+        <button className="rv-stat" data-share-toggle aria-label="分享给朋友" aria-expanded={shareOpen} onClick={onToggleShare}>
           <Forward color={shareOpen ? "#ff2c55" : "#fff"} fill={shareOpen ? "#ff2c55" : "#fff"} size={30} /><span>{count(record.stats?.shareCount)}</span>
         </button>
         {record.url && onDownload ? <button className="rv-stat" aria-label={DOWNLOAD_SPOKEN[downloadState]} disabled={downloadState === "queued" || downloadState === "running"} onClick={onDownload}>
           {downloadState === "queued" || downloadState === "running" ? <span className="rv-download-spin"><span className="rv-spinner" /></span>
             : downloadState === "complete" ? <Check color="#fff" size={30} /> : <Download color="#fff" size={30} />}<span>{DOWNLOAD_LABEL[downloadState]}</span>
         </button> : null}
-        {canAnalyze && commentsConnection ? <button className={`rv-stat${analysisOpen ? " rv-selected" : ""}`} aria-label="解析视频" aria-pressed={analysisOpen}
-          onClick={() => { const next = !analysisOpen; setAnalysisOpen(next); if (next && commentsOpen) onToggleComments(); if (next && shareOpen) onToggleShare(); }}>
-          <Sparkles color={analysisOpen ? "#ff2c55" : "#fff"} fill={analysisOpen ? "#ff2c55" : "none"} size={29} /><span>解析视频</span>
+        {record.url ? <button className="rv-stat" aria-label="复制链接" onClick={() => {
+          void copyVideoLink(record.url!).then((copied) => setToast(copied ? "链接已复制" : "没能复制，请在抖音原页复制链接。"));
+        }}>
+          <Link color="#fff" size={29} /><span>复制链接</span>
         </button> : null}
       </aside>
       <div className="rv-caption">
@@ -539,9 +542,6 @@ function Playback({ active, record, onLoadVideo, muted, onToggleMute, commentsOp
           }}><Maximize color="#fff" size={18} /></button>
         </div>
       </div>
-      {active && analysisOpen && canAnalyze && commentsConnection && <VideoAnalysisPanel key={`${accountId}-${analysisVideoId}`}
-        connection={commentsConnection} accountId={accountId} videoId={analysisVideoId} title={record.title}
-        onSeek={seekAnalysis} onClose={() => setAnalysisOpen(false)} notify={setToast} />}
       {toast ? <p className="rv-toast" role="status">{toast}</p> : null}
       {active && shareOpen ? <VideoShare record={record} connection={commentsConnection} onClose={onToggleShare} /> : null}
     </div>
@@ -738,7 +738,7 @@ function VideoShare({ record, connection, onClose }: { record: PersonalVideoReco
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   useEffect(() => {
-    const close = (event: PointerEvent) => { if (!(event.target as Element).closest("[data-share-panel],[data-analysis-panel],[data-share-toggle]")) closeRef.current(); };
+    const close = (event: PointerEvent) => { if (!(event.target as Element).closest("[data-share-panel],[data-share-toggle]")) closeRef.current(); };
     document.addEventListener("pointerdown", close, true);
     return () => document.removeEventListener("pointerdown", close, true);
   }, []);
@@ -770,15 +770,7 @@ function VideoShare({ record, connection, onClose }: { record: PersonalVideoReco
     }
   };
   const copy = async () => {
-    const url = record.url!;
-    // 内嵌浏览器可能不给剪贴板权限，退回到选中文字再复制的老办法。
-    const fallback = () => {
-      const area = Object.assign(document.createElement("textarea"), { value: url });
-      document.body.append(area); area.select();
-      const copied = document.execCommand("copy"); area.remove();
-      return copied;
-    };
-    const copied = await navigator.clipboard.writeText(url).then(() => true, fallback);
+    const copied = await copyVideoLink(record.url!);
     setNotice(copied ? "链接已复制" : "没能复制，请在抖音原页复制链接。");
   };
   const people = (page?.items as ExploreSharee[] | undefined) ?? [];
