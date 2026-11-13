@@ -80,7 +80,7 @@ import Svg, { Circle } from "react-native-svg";
 import { ChatWorkspace } from "./ChatWorkspace";
 import { MyCommentsView } from "./MyCommentsView";
 import { RecordVideoPlayer, type RecordVideoLoader } from "./RecordVideoPlayer";
-import { VideoAnalysisBatchDialog, VideoAnalysisDialog } from "./VideoAnalysisPanel";
+import { VideoAnalysisBatchDialog } from "./VideoAnalysisPanel";
 import { videoAnalysisBatch } from "../../services/videoAnalysis";
 import { LiveRoomPlayer, type LiveTarget } from "./LiveRoomPlayer";
 import { liveRoomIdFrom, readFollowingLive, type LiveFollowing } from "../../services/liveRoom";
@@ -1209,8 +1209,6 @@ function RecordsGallery({
   const enterFrom = batch.current.from;
   const enterOrder = useMemo(() => new Map((incoming ?? NO_RECORDS).slice(enterFrom, ready).map((record, index) => [record.id, index + 1])), [incoming, enterFrom, ready]);
   const [playingRecord, setPlayingRecord] = useState<{ record: PersonalVideoRecord; startMs?: number } | null>(null);
-  const [analysisRecord, setAnalysisRecord] = useState<PersonalVideoRecord | null>(null);
-  const analysisId = analysisRecord && analysisVideoIdOf(analysisRecord);
   const [liveTarget, setLiveTarget] = useState<LiveTarget | null>(null);
   const openLive = Platform.OS === "web" && !privacy
     ? (record: PersonalVideoRecord) => record.url && setLiveTarget({ room: record.url, title: record.title, anchor: record.author, cover: record.coverUrl })
@@ -1248,7 +1246,7 @@ function RecordsGallery({
   // 换了搜索词、换了文件夹就重新选，免得之前选的、现在看不见的那些悄悄留在下载列表里
   useEffect(() => { setSelected(new Set()); }, [query, activeFolder]);
   useEffect(() => { setKeptKeys(new Set()); }, [label, activeFolder]);
-  useEffect(() => { setPlayingRecord(null); setAnalysisRecord(null); setLiveTarget(null); setQuery(""); }, [label, privacy, accountId]);
+  useEffect(() => { setPlayingRecord(null); setLiveTarget(null); setQuery(""); }, [label, privacy, accountId]);
   const list = Platform.OS === "web" && folders && onChangeFolders ? folders : null;
   // 文件夹读不到了（换账号、采集器出错），整理模式就没法用了，退出来，免得剩个没有出口的工具条
   useEffect(() => { if (!list && selectMode === "folder") setSelectMode(null); }, [list, selectMode]);
@@ -1366,10 +1364,6 @@ function RecordsGallery({
   latest.current = { onDownloadRecord, onOpenRecord, openLive, openFolderMenu, commentsConnection, onOpenSettings };
   const handlers = useMemo(() => ({
     download: (record: PersonalVideoRecord) => latest.current.onDownloadRecord!(record),
-    analyze: (record: PersonalVideoRecord) => {
-      if (latest.current.commentsConnection) setAnalysisRecord(record);
-      else latest.current.onOpenSettings();
-    },
     open: (url: string) => latest.current.onOpenRecord(url),
     live: (record: PersonalVideoRecord) => { latest.current.openLive?.(record); },
     folder: (record: PersonalVideoRecord, at: MenuPoint) => latest.current.openFolderMenu([record], at),
@@ -1657,7 +1651,6 @@ function RecordsGallery({
           : keptKeys.has(folderKey(item)) && (list.items[folderKey(item)] ?? UNFILED) !== folderFilter ? filedIn ?? "未分区"
           : undefined;
         const onFolderMenu = list && !privacy ? handlers.folder : undefined;
-        const onAnalyze = Platform.OS === "web" && !privacy && analysisVideoIdOf(item) ? handlers.analyze : undefined;
         return layout === "grid"
           ? <RecordTile
               cellStyle={cellStyle}
@@ -1666,7 +1659,6 @@ function RecordsGallery({
               filedIn={filedIn}
               folderName={folderName}
               onDownloadRecord={item.mediaType === "live" || !onDownloadRecord ? undefined : handlers.download}
-              onAnalyze={onAnalyze}
               onFolderMenu={onFolderMenu}
               onPlayRecord={item.mediaType === "live" ? openLive && handlers.live : onLoadVideo ? playRecord : undefined}
               onOpenRecord={handlers.open}
@@ -1677,16 +1669,11 @@ function RecordsGallery({
               type={activeType}
               enter={enterOrder.get(item.id)}
             />
-          : <RecordRow enter={enterOrder.get(item.id)} folderName={folderName} onFolderMenu={onFolderMenu} onAnalyze={onAnalyze} selection={selectionFor(item)} onOpenRecord={handlers.open} privacy={privacy} record={item} type={activeType} coverConnection={commentsConnection} coverOwner={coverOwner} />;
+          : <RecordRow enter={enterOrder.get(item.id)} folderName={folderName} onFolderMenu={onFolderMenu} selection={selectionFor(item)} onOpenRecord={handlers.open} privacy={privacy} record={item} type={activeType} coverConnection={commentsConnection} coverOwner={coverOwner} />;
       }}
       // 上万条记录靠滚轮翻太慢，留一条常驻、能拖的滚动条（样式见 motionCss 的 data-scrollbar）
       {...{ dataSet: { scrollbar: "" } }}
     />
-    {analysisId && analysisRecord && commentsConnection && !playingRecord && !privacy ? (
-      <VideoAnalysisDialog key={`${accountId}-${analysisId}`} accountId={accountId} connection={commentsConnection} videoId={analysisId}
-        title={analysisRecord.title} onClose={() => setAnalysisRecord(null)}
-        onSeek={onLoadVideo ? startMs => setPlayingRecord({ record: analysisRecord, startMs }) : undefined} />
-    ) : null}
     {Platform.OS === "web" && playingRecord && !privacy && onLoadVideo ? (
       <RecordVideoPlayer record={playingRecord.record} initialTimeMs={playingRecord.startMs} records={shownRecords} onLoadVideo={onLoadVideo} commentsConnection={commentsConnection} accountId={accountId} onOpenRecord={onOpenRecord} onClose={() => setPlayingRecord(null)}
         onDownload={onDownloadRecord ? (record) => void onDownloadRecord(record, true) : undefined} downloadStates={downloadStates} />
@@ -1801,6 +1788,22 @@ function SelectionMark({ selection }: { selection: RecordSelection }) {
   </View>;
 }
 
+async function copyRecordLink(url: string): Promise<boolean> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+    await navigator.clipboard.writeText(url);
+    return true;
+  } catch {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const area = document.createElement("textarea");
+    area.value = url;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.append(area);
+    try { area.select(); return document.execCommand("copy"); } catch { return false; } finally { area.remove(); previousFocus?.focus(); }
+  }
+}
+
 const RecordTile = memo(function RecordTile({
   cellStyle,
   selection,
@@ -1808,7 +1811,6 @@ const RecordTile = memo(function RecordTile({
   filedIn,
   folderName,
   onDownloadRecord,
-  onAnalyze,
   onFolderMenu,
   onPlayRecord,
   record,
@@ -1827,7 +1829,6 @@ const RecordTile = memo(function RecordTile({
   /** 封面左上角标出的文件夹名 */
   folderName?: string;
   onDownloadRecord?: (record: PersonalVideoRecord) => Promise<void>;
-  onAnalyze?: (record: PersonalVideoRecord) => void;
   /** 打开「放进文件夹」菜单：悬停时右上角的按钮、右键都走这里 */
   onFolderMenu?: (record: PersonalVideoRecord, at: MenuPoint) => void;
   onPlayRecord?: (record: PersonalVideoRecord) => void;
@@ -1859,20 +1860,7 @@ const RecordTile = memo(function RecordTile({
       : downloadState === "failed" ? "重试" : "下载";
   const copyLink = async () => {
     if (!record.url) return;
-    let copied = false;
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(record.url);
-      copied = true;
-    } catch {
-      const previousFocus = document.activeElement as HTMLElement | null;
-      const area = document.createElement("textarea");
-      area.value = record.url;
-      area.style.position = "fixed";
-      area.style.opacity = "0";
-      document.body.append(area);
-      try { area.select(); copied = document.execCommand("copy"); } catch { copied = false; } finally { area.remove(); previousFocus?.focus(); }
-    }
+    const copied = await copyRecordLink(record.url);
     setCopyState(copied ? "copied" : "failed");
     if (copyTimer.current) clearTimeout(copyTimer.current);
     copyTimer.current = setTimeout(() => setCopyState("idle"), 2500);
@@ -2032,7 +2020,7 @@ const RecordTile = memo(function RecordTile({
               {downloading ? <ActivityIndicator color={color.white} size="small" /> : <Download color={color.white} size={14} strokeWidth={2.2} />}
               <Text style={styles.tileActionText}>{downloadLabel}</Text>
             </Pressable>
-            {type === "favorite_videos" ? <Pressable
+            <Pressable
               testID="record-tile-action"
               accessibilityLabel={copyState === "copied" ? "链接已复制" : copyState === "failed" ? "复制失败，请重试" : "复制抖音链接"}
               accessibilityRole="button"
@@ -2044,19 +2032,7 @@ const RecordTile = memo(function RecordTile({
             >
               {copyState === "copied" ? <Check color={color.white} size={14} strokeWidth={2.2} /> : <Copy color={color.white} size={14} strokeWidth={2.2} />}
               <Text style={styles.tileActionText}>{copyState === "copied" ? "已复制" : copyState === "failed" ? "失败" : "复制"}</Text>
-            </Pressable> : onAnalyze ? <Pressable
-              testID="record-tile-action"
-              accessibilityLabel="解析视频"
-              accessibilityRole="button"
-              onFocus={markFocused}
-              onBlur={checkFocusBoundary}
-              onPress={() => onAnalyze(record)}
-              {...ws("btn-sig w-tileaction")}
-              style={({ pressed }) => [styles.tileAction, pressed && styles.tileActionPressed, webPointer]}
-            >
-              <Sparkles color={color.white} size={14} strokeWidth={2.2} />
-              <Text style={styles.tileActionText}>解析</Text>
-            </Pressable> : null}
+            </Pressable>
           </View>
         </View>
       ) : null}
@@ -2064,7 +2040,7 @@ const RecordTile = memo(function RecordTile({
   );
 });
 
-const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord, onAnalyze, selection, folderName, onFolderMenu, enter, coverConnection, coverOwner }: {
+const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord, selection, folderName, onFolderMenu, enter, coverConnection, coverOwner }: {
   enter?: number;
   record: PersonalVideoRecord;
   coverConnection?: ExploreConnection | null;
@@ -2072,12 +2048,14 @@ const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord,
   type: PersonalRecordType;
   privacy: boolean;
   onOpenRecord: (url: string) => Promise<void>;
-  onAnalyze?: (record: PersonalVideoRecord) => void;
   selection?: RecordSelection;
   folderName?: string;
   onFolderMenu?: (record: PersonalVideoRecord, at: MenuPoint) => void;
 }) {
   const [rowRef, inView] = useInView();
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
   const { coverUrl, onError: onCoverError } = useRecordCover(record, coverConnection, coverOwner, inView && !privacy);
   const accent = type === "liked_videos" ? color.accent : type === "favorite_videos" ? color.amber : color.cyan;
   const imageAvailable = Boolean(coverUrl);
@@ -2117,9 +2095,16 @@ const RecordRow = memo(function RecordRow({ record, type, privacy, onOpenRecord,
       </View>
       {record.url && !selection ? <ArrowUpRight color={color.textMuted} size={19} /> : null}
     </Pressable>
-    {!selection && onAnalyze ? <Pressable accessibilityRole="button" accessibilityLabel="解析视频" onPress={() => onAnalyze(record)}
+    {!selection && !privacy && Platform.OS === "web" && record.url ? <Pressable accessibilityRole="button"
+      accessibilityLabel={copyState === "copied" ? "链接已复制" : copyState === "failed" ? "复制失败，请重试" : "复制抖音链接"}
+      onPress={() => void copyRecordLink(record.url!).then(copied => {
+        setCopyState(copied ? "copied" : "failed");
+        if (copyTimer.current) clearTimeout(copyTimer.current);
+        copyTimer.current = setTimeout(() => setCopyState("idle"), 2500);
+      })}
       style={({ pressed }) => [styles.rowAnalyze, pressed && styles.recordRowPressed, webPointer]}>
-      <Sparkles color={color.textSecondary} size={15} /><Text style={styles.rowAuthor}>解析</Text>
+      {copyState === "copied" ? <Check color={color.textSecondary} size={15} /> : <Copy color={color.textSecondary} size={15} />}
+      <Text style={styles.rowAuthor}>{copyState === "copied" ? "已复制" : copyState === "failed" ? "失败" : "复制"}</Text>
     </Pressable> : null}
     </View>
   );
