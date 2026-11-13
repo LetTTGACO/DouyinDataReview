@@ -1209,18 +1209,8 @@ function AppContent() {
     if (!collectorToken || collectorBusy || syncConfirmationOpenRef.current) return;
     if (!canReadCollector(collectorStatus, "videos")) { openLogin(); return; }
     if (collectorStatus?.browserSource?.credentials === "reconnect_required") { openLogin(); return; }
-    syncConfirmationOpenRef.current = true;
-    confirmAlert(
-      "增量读取",
-      `这次读${readTypeNames}。首次读取观看历史最近 7 天、喜欢和收藏各最多 200 条，之后补读新增记录。需要更多历史时可选择「完整读取」。凭据失效时请到设置 → 账号重新连接浏览器并导入。`,
-      "读取新记录",
-      (confirmed) => {
-        syncConfirmationOpenRef.current = false;
-        if (!confirmed) return;
-        leaveArchiveView();
-        void beginSync(collectorUrl, collectorToken, true);
-      },
-    );
+    leaveArchiveView();
+    void beginSync(collectorUrl, collectorToken, true);
   }
 
   async function disconnectCollector() {
