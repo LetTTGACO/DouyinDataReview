@@ -5,7 +5,6 @@ import { parseAssistantConfig } from "./assistant/chat.mjs";
 import { transcribeAudio } from "./videoAnalysisAsr.mjs";
 import { extractAudio, extractFrameAt, extractFrames, inspectVideo } from "./videoAnalysisMedia.mjs";
 import { describeCodexFrames, describeFrames, describeVideo, makeStudyNotes } from "./videoAnalysisModel.mjs";
-import { runtimeLabel } from "./localAi.mjs";
 
 const titles = { transcript: "带时间戳的逐字稿", script: "原片分镜脚本", notes: "学习笔记" };
 const engines = { bcut: "必剪", qwen: "Qwen3-ASR" };
@@ -51,9 +50,8 @@ function options(body) {
 }
 
 function result(request, entries, article) {
-  const { key, kind, engine, withFrames, model, title } = request;
-  // 视频标题一起存下，知识库里列出和引用时用
-  const common = { key, kind, engine, withFrames, model, ...(title && { title }), createdAt: new Date().toISOString(), entries };
+  const { key, kind, engine, withFrames, model } = request;
+  const common = { key, kind, engine, withFrames, model, createdAt: new Date().toISOString(), entries };
   if (article) {
     const chapters = [{ title: "视频核心观点", text: article.overview }, ...entries.map((entry, i) =>
       ({ title: `${i + 1}. ${entry.title}`, text: entry.text, figure: entry.figure })), { title: "AI 总结", text: article.summary }];
@@ -283,7 +281,7 @@ export class VideoAnalysis {
       media = await this.media.inspectVideo(source, signal);
       await save(metadataFile, media, signal);
     }
-    const transcriptRequest = options({ kind: "transcript", engine: request.engine, title: request.title });
+    const transcriptRequest = options({ kind: "transcript", engine: request.engine });
     let transcript = await readJson(output(transcriptRequest.key));
     if (!transcript) {
       let entries = [];
@@ -377,8 +375,8 @@ export class VideoAnalysis {
   }
 
   async describe(dir, source, media, request, signal, update) {
-    if (request.config.runtime === "claude" || request.config.runtime === "workbuddy")
-      throw fail("vision_unsupported", `当前 ${runtimeLabel(request.config.runtime, request.config.model)} 接入仅支持文本。可改做口播笔记，或选择 Codex 或支持图片的接口模型。`);
+    if (request.config.runtime === "claude")
+      throw fail("vision_unsupported", "当前 Claude Code 接入仅支持文本。可改做口播笔记，或选择 Codex 或支持图片的接口模型。");
     const manifest = path.join(dir, "frames.json");
     const directory = path.join(dir, "frames");
     let frames = await readJson(manifest);

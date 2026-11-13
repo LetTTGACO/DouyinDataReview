@@ -22,7 +22,7 @@
 
 <p align="center"><sub>推荐流控制、把视频解析成学习笔记。笔记由作者自己的讲解片解析而来，词条和处置记录是示例数据。</sub></p>
 
-<p align="center"><a href="https://github.com/ZhangYukwiver/DouyinDataReview/releases/latest">下载桌面版</a> · <a href="https://zhangyukwiver.github.io/DouyinDataReview/">国内下载（加速线路）</a> · <a href="https://zhangyukwiver.github.io/DouyinDataReview/app/">在线体验</a> · <a href="https://zhangyukwiver.github.io/DouyinDataReview/#demo">在线看示例报告</a> · <a href="#面向开发者">从源码运行</a> · <a href="https://github.com/ZhangYukwiver/DouyinDataReview/stargazers">觉得有用就 Star</a></p>
+<p align="center"><a href="https://github.com/ZhangYukwiver/DouyinDataReview/releases/latest">下载桌面版</a> · <a href="https://zhangyukwiver.github.io/DouyinDataReview/">国内下载（加速线路）</a> · <a href="https://zhangyukwiver.github.io/DouyinDataReview/#demo">在线看示例报告</a> · <a href="#面向开发者">从源码运行</a> · <a href="https://github.com/ZhangYukwiver/DouyinDataReview/stargazers">觉得有用就 Star</a></p>
 
 **DouyinDataReview 是一款免费开源的抖音数据采集、导出与分析桌面应用。** 它用你本人登录的抖音会话读取观看历史、喜欢、收藏、好友聊天及白名单群消息，保存在本机；能按关键词控制抖音推荐流，把视频解析成逐字稿、学习笔记和分镜脚本。工作台还能在电脑上刷抖音推荐、下载视频、实时聊天、看创作者中心和直播，生成持续报告和抖音年度报告（Douyin Wrapped），另有可选的 AI 助手。
 
@@ -41,10 +41,8 @@
 - **刷视频与内容库**：在电脑上刷抖音推荐，浏览、搜索、批量下载自己的记录
 - **聊天与续火花**：实时收发消息，一键续火花
 - **创作者中心、探索与直播**：看自己的作品和粉丝数据（能导出表格）、热点榜、关注的人的直播
-- **AI 助手（可选）**：用对话查数据、替你操作，可在设置中选择本机 Codex、Claude Code 或 WorkBuddy，也支持模型接口；Claude Code、Codex 等客户端还可通过 MCP 接入
+- **AI 助手（可选）**：用对话查数据、替你操作，Claude Code、Codex 可通过 MCP 接入
 - **年度报告**：三种风格，可导出 HTML 和分享图
-
-WorkBuddy 接入需要安装并打开桌面版、保持账号已登录。应用通过 WorkBuddy 自带的本机通道使用账号，无需填写 API Key。当前支持 AI 对话、应用工具操作和口播学习笔记；关键帧识别请使用 Codex 或支持图片的接口模型。
 
 点赞、评论这些和抖音里一样，默认关着，在「设置 → 隐私」打开。
 
