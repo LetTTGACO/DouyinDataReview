@@ -26,6 +26,8 @@ node collector/mcpStdio.mjs
 
 ## macOS 本地稳定版升级（命令行）
 
+上游更新以正式发布的版本 Tag 为基准。合入前核对目标 Tag；由于曾撤销一次上游 main 合并，后续合入包含该合并的 Tag 时，需核对实际文件差异，确保目标版本的改动完整进入。
+
 本地稳定版升级默认直接使用命令行完成构建、备份、退出进程、替换程序和重启，并以实际 MCP 调用验收。源码调试版继续使用独立的数据目录。
 
 1. 在发布工作树运行 `EXPO_NO_TELEMETRY=1 npm run desktop:build:mac`，再用 `scripts/verify-release-package.mjs` 校验新 App 的 `Contents/Resources`，用 `codesign --verify --deep --strict` 校验签名完整性。记录版本、源码提交及安装包校验和。
