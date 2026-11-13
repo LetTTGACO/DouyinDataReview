@@ -295,7 +295,7 @@ export function ContentWorkspace({
   const groups = sideGroups.map((group) => ({ ...group, items: group.items.filter((item) => (item.id !== "assistant" || assistant) && (item.id !== "feed" || feed !== undefined)) }));
   const sides = groups.flatMap((group) => group.items);
   // 点侧栏「内容库」「报告」回到上次看的那一栏
-  const lastLibraryView = useRef<WorkspaceViewKey>(isLibraryView(activeView) ? activeView : "watch_history");
+  const lastLibraryView = useRef<WorkspaceViewKey>(isLibraryView(activeView) ? activeView : "favorite_videos");
   if (isLibraryView(activeView)) lastLibraryView.current = activeView;
   const lastReportView = useRef<WorkspaceViewKey>(reportView ? activeView : "summary");
   if (reportView) lastReportView.current = activeView;
@@ -1132,6 +1132,8 @@ function FolderDialog({
   );
 }
 
+const DEFAULT_FAVORITE_FOLDER = ":default-favorite";
+
 function RecordsGallery({
   activeType,
   compactHeader = false,
@@ -1218,7 +1220,11 @@ function RecordsGallery({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchRecords, setBatchRecords] = useState<PersonalVideoRecord[] | null>(null);
   const [query, setQuery] = useState("");
-  const [activeFolder, setActiveFolder] = useState(ALL_FOLDERS);
+  const folderScope = JSON.stringify([label, activeType, accountId]);
+  const defaultFolder = activeType === "favorite_videos" ? DEFAULT_FAVORITE_FOLDER : ALL_FOLDERS;
+  const [folderSelection, setFolderSelection] = useState({ scope: folderScope, folder: defaultFolder });
+  const activeFolder = folderSelection.scope === folderScope ? folderSelection.folder : defaultFolder;
+  const setActiveFolder = (folder: string) => setFolderSelection({ scope: folderScope, folder });
   const [leadFolder, setLeadFolder] = useState<string | null>(null);
   // 在文件夹（或未分区）里移走的视频，换筛选之前先留在原处
   const [keptKeys, setKeptKeys] = useState<ReadonlySet<string>>(new Set());
@@ -1242,7 +1248,6 @@ function RecordsGallery({
     return () => controller.abort();
   }, [batchBaseUrl, batchToken, accountId]);
   useEffect(() => { setSelectMode(null); setSelected(new Set()); setFolderDialog(null); }, [label, privacy]);
-  useEffect(() => { setActiveFolder(ALL_FOLDERS); }, [label]);
   // 换了搜索词、换了文件夹就重新选，免得之前选的、现在看不见的那些悄悄留在下载列表里
   useEffect(() => { setSelected(new Set()); }, [query, activeFolder]);
   useEffect(() => { setKeptKeys(new Set()); }, [label, activeFolder]);
@@ -1254,7 +1259,8 @@ function RecordsGallery({
   // 当前文件夹删掉了、换账号读到的是另一份，就回到「全部」
   const folderFilter = !list
     ? ALL_FOLDERS
-    : activeFolder === UNFILED ? (list.folders.length ? UNFILED : ALL_FOLDERS)
+    : activeFolder === DEFAULT_FAVORITE_FOLDER ? list.folders.find((folder) => folder.name === "参考视频")?.id ?? ALL_FOLDERS
+      : activeFolder === UNFILED ? (list.folders.length ? UNFILED : ALL_FOLDERS)
       : folderById.has(activeFolder) ? activeFolder : ALL_FOLDERS;
   // 回到「全部」要记下来，不然之后再建文件夹，视图会自己跳回原来那个筛选；文件夹还没读到时不动
   useEffect(() => { if (list && folderFilter !== activeFolder) setActiveFolder(folderFilter); }, [list, folderFilter, activeFolder]);
