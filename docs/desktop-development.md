@@ -35,6 +35,6 @@ node collector/mcpStdio.mjs
 1. 在发布工作树运行 `EXPO_NO_TELEMETRY=1 npm run desktop:build:mac`，再用 `scripts/verify-release-package.mjs` 校验新 App 的 `Contents/Resources`，用 `codesign --verify --deep --strict` 校验签名完整性。记录版本、源码提交及安装包校验和。
 2. 通过 `app_overview` 记录当前账号和运行状态，使用 `stop_reading` 暂停仍在运行的记录读取与聊天接收，等待数据落盘。保存升级前的记录与消息 ID，供升级后比对。
 3. 用 `lsof` 按正式版采集器端口定位监听进程，再用 `ps` 核对其可执行文件路径。仅退出核对过的正式版进程，并确认进程退出、端口释放。
-4. 备份旧 App 和整个 `~/Library/Application Support/内容数据工作台/collector/`。用 `ditto` 将新 App 复制到应用程序目录中的临时路径，校验后替换 `/Applications/DouyinDataReview.app`；替换失败时恢复旧 App。沿用原账号、登录凭据、群聊白名单及 MCP 令牌。
+4. 将旧 App 和整个 `~/Library/Application Support/内容数据工作台/collector/` 备份到项目根目录的 `.local-data/desktop-upgrade-backup/`，作为一套升级备份。该目录已被 Git 忽略，可能包含敏感数据。每次升级只保留最近一套：先在同一项目目录中完成并校验新备份，再替换旧备份。用 `ditto` 将新 App 复制到应用程序目录中的临时路径，校验后替换 `/Applications/DouyinDataReview.app`；替换失败时恢复旧 App。沿用原账号、登录凭据、群聊白名单及 MCP 令牌。
 5. 用 `open -a /Applications/DouyinDataReview.app` 重启，核对安装版本、服务健康和已安装资源。通过现有 MCP 配置的实际命令、参数和环境变量验证 `initialize`、`tools/list` 及本次修改的工具返回；涉及聊天时使用已有本地消息验证。
 6. 确认原账号和历史记录仍在，恢复升级前开启的聊天接收并检查连接状态。将备份位置、安装版本及 MCP 验证结果记入本地升级记录。
